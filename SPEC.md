@@ -95,6 +95,8 @@ Default posture:
                      new_fingerprint text, started_at timestamptz, completed_at timestamptz,
                      status text)`
 
+`alpha_users(username text PK, password_hash text, roles jsonb, created_at timestamptz)`
+
 Startup bootstrap: server runs migrations in sorted order, skipping already-recorded versions.
 Migration filenames MUST use `NNN_descriptive_slug.sql`, where `NNN` is the
 zero-padded ordering number and `descriptive_slug` is lowercase ASCII words separated
@@ -280,6 +282,14 @@ Key and secret rotation:
 User SSHes to `server:22` (asyncssh server). Auth methods:
 - Public key (`validate_public_key`), or
 - Keyboard-interactive LDAP password.
+
+Alpha-stage local auth:
+- Until LDAP/Azure AD development starts, migration `002_seed_alpha_admin_user.sql`
+  creates `alpha_users` and seeds `admin` with password `password`.
+- The seeded password MUST be stored as `sha256:<hex>` rather than plaintext, and
+  the seed migration MUST be idempotent.
+- `alpha_users` is an alpha-only development auth source and MUST be removed or
+  replaced before any non-alpha deployment.
 
 Keyboard-interactive scope:
 - LDAP password auth is implemented as an LDAP bind over StartTLS/LDAPS.

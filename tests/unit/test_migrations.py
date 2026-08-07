@@ -16,6 +16,9 @@ from vibeconnect_common.db import (
 )
 
 MIGRATION_SQL = Path("src/migrations/001_initial_schema.sql").read_text()
+ALPHA_USER_MIGRATION_SQL = Path(
+    "src/migrations/002_seed_alpha_admin_user.sql"
+).read_text()
 
 
 class FakeTransaction:
@@ -112,6 +115,20 @@ def test_schema_defines_required_indexes() -> None:
         "sessions_agent_id_idx",
     ):
         assert f"CREATE INDEX {index_name}" in MIGRATION_SQL
+
+
+def test_alpha_admin_seed_uses_hashed_password() -> None:
+    """The alpha admin seed is local-only and does not store plaintext passwords."""
+    assert "CREATE TABLE alpha_users" in ALPHA_USER_MIGRATION_SQL
+    assert "username text PRIMARY KEY" in ALPHA_USER_MIGRATION_SQL
+    assert "password_hash text NOT NULL" in ALPHA_USER_MIGRATION_SQL
+    assert "'admin'" in ALPHA_USER_MIGRATION_SQL
+    assert (
+        "'sha256:5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8'"
+        in ALPHA_USER_MIGRATION_SQL
+    )
+    assert "ON CONFLICT (username) DO NOTHING" in ALPHA_USER_MIGRATION_SQL
+    assert "'password'" not in ALPHA_USER_MIGRATION_SQL
 
 
 def test_load_migrations_accepts_descriptive_names(tmp_path: Path) -> None:
