@@ -128,6 +128,123 @@ class EnrollmentStore(Protocol):
         """Persist an enrolled agent row."""
 
 
+class EnrollmentConnection(Protocol):
+    """Database surface used by the PostgreSQL enrollment store."""
+
+    async def execute(self, query: str, *args: object) -> str:
+        """Execute a statement without returning rows."""
+
+    async def fetchrow(self, query: str, *args: object) -> Mapping[str, object] | None:
+        """Execute a statement and return one row."""
+
+
+class PostgresEnrollmentStore:
+    """PostgreSQL-backed enrollment store."""
+
+    def __init__(self, connection: EnrollmentConnection) -> None:
+        """Configure the database connection."""
+        self._connection = connection
+
+    async def create_enrollment_token(
+        self,
+        *,
+        token_hash: str,
+        node_name: str,
+        labels: Sequence[str],
+        created_by: str,
+        expires_at: dt.datetime,
+    ) -> None:
+        """Disable prior active tokens for the node and insert a new token."""
+        now = _utc_now()
+        await self._connection.execute(
+            """
+            UPDATE enrollment_tokens
+               SET disabled_at = $1
+             WHERE node_name = $2
+               AND used = false
+               AND disabled_at IS NULL
+            """,
+            now,
+            node_name,
+        )
+        await self._connection.execute(
+            """
+            INSERT INTO enrollment_tokens
+                (token_hash, node_name, created_by, created_at, expires_at)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            token_hash,
+            node_name,
+            created_by,
+            now,
+            _as_utc(expires_at),
+        )
+
+    async def consume_enrollment_token(
+        self, *, token_hash: str, node_name: str, now: dt.datetime
+    ) -> EnrollmentTokenRecord | None:
+        """Atomically consume a matching active token."""
+        row = await self._connection.fetchrow(
+            """
+            UPDATE enrollment_tokens
+               SET used = true, used_at = $3
+             WHERE token_hash = $1
+               AND node_name = $2
+               AND used = false
+               AND disabled_at IS NULL
+               AND expires_at > $3
+            RETURNING token_hash, node_name
+            """,
+            token_hash,
+            node_name,
+            _as_utc(now),
+        )
+        if row is None:
+            return None
+        return EnrollmentTokenRecord(
+            token_hash=str(row["token_hash"]),
+            node_name=str(row["node_name"]),
+        )
+
+    async def persist_agent(self, agent: StoredAgent) -> None:
+        """Persist an enrolled agent row."""
+        await self._connection.execute(
+            """
+            INSERT INTO agents
+                (
+                    id,
+                    node_name,
+                    x509_public_key,
+                    node_ssh_host_public_key,
+                    tunnel_secret_hash,
+                    enrolled_at,
+                    cert_serial,
+                    cert_expires_at
+                )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            """,
+            agent.agent_id,
+            agent.node_name,
+            agent.x509_public_key,
+            agent.node_ssh_host_public_key,
+            agent.tunnel_secret_hash,
+            _utc_now(),
+            agent.cert_serial,
+            _as_utc(agent.cert_expires_at),
+        )
+        await self._connection.execute(
+            """
+            UPDATE enrollment_tokens
+               SET agent_id = $1
+             WHERE node_name = $2
+               AND used = true
+               AND agent_id IS NULL
+            """,
+            agent.agent_id,
+            agent.node_name,
+        )
+
+
 class InMemoryEnrollmentStore:
     """Locking in-memory store used by unit tests and early wiring."""
 

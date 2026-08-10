@@ -1,0 +1,65 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: vibeconnect
+      POSTGRES_USER: vibeconnect
+      POSTGRES_PASSWORD: vibeconnect
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vibeconnect -d vibeconnect"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  ldap:
+    build:
+      context: .
+      dockerfile: ldap/Dockerfile
+    environment:
+      LDAP_ORGANISATION: VibeConnect
+      LDAP_DOMAIN: example.test
+      LDAP_ADMIN_PASSWORD: admin
+
+  node:
+    build:
+      context: ./node
+    ports:
+      - "127.0.0.1:2222:2222"
+    volumes:
+      - ./fixtures/vibeconnect-ca.pub:/etc/ssh/vibeconnect-ca.pub:ro
+
+  server:
+    build:
+      context: ../..
+      dockerfile: tests/integration/server.Dockerfile
+    environment:
+      VIBECONNECT_POSTGRES_DSN: postgresql://vibeconnect:vibeconnect@postgres:5432/vibeconnect
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ldap:
+        condition: service_started
+      node:
+        condition: service_started
+    volumes:
+      - ./fixtures/server.config.yaml:/etc/vibeconnectd/config.yaml:ro
+      - ./fixtures:/fixtures:ro
+    command: ["python", "-m", "server.main", "migrate"]
+
+  agent:
+    build:
+      context: ../..
+      dockerfile: tests/integration/agent.Dockerfile
+    user: "1000:1000"
+    depends_on:
+      server:
+        condition: service_completed_successfully
+      node:
+        condition: service_started
+    volumes:
+      - ./fixtures/agent.conf:/etc/vibeconnect/agent.conf:ro
+      - agent-state:/var/lib/vibeconnect
+    command: ["python", "-m", "agent.main"]
+
+volumes:
+  agent-state:

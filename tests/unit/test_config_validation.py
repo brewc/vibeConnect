@@ -6,6 +6,7 @@ import pytest
 
 from vibeconnect_common.config import (
     ConfigError,
+    load_agent_config,
     validate_agent_config,
     validate_server_config,
 )
@@ -76,6 +77,16 @@ def test_validate_server_config_rejects_azure_keyboard_interactive(
     config = _server_config(tmp_path, keyboard_interactive_verifier="azure_ad")
 
     with pytest.raises(ConfigError, match="Azure AD"):
+        validate_server_config(config)
+
+
+def test_validate_server_config_rejects_non_loopback_metrics(
+    tmp_path: Path,
+) -> None:
+    """Health and metrics endpoints bind to loopback by default."""
+    config = _server_config(tmp_path, metrics_listen="0.0.0.0:9100")
+
+    with pytest.raises(ConfigError, match="metrics.listen"):
         validate_server_config(config)
 
 
@@ -153,6 +164,48 @@ def test_validate_agent_config_rejects_token_after_enrollment(
         validate_agent_config(config)
 
 
+def test_load_agent_config_parses_agent_conf(tmp_path: Path) -> None:
+    """Agent config files are parsed into the typed config model."""
+    config_path = tmp_path / "agent.conf"
+    enrollment_ca = _touch_public(tmp_path / "enrollment-ca.crt")
+    tunnel_ca = _touch_public(tmp_path / "tunnel-ca.crt")
+    config_path.write_text(
+        "\n".join(
+            [
+                "[enrollment]",
+                "node_name = node-01",
+                "token = raw-token",
+                "api_url = https://server.example.test/enroll",
+                f"tls_ca_bundle = {enrollment_ca}",
+                "",
+                "[identity]",
+                f"path = {tmp_path / 'identity' / 'identity.json'}",
+                "",
+                "[tunnel]",
+                "server_url = tls://tunnel.example.test:12345",
+                f"tls_ca_bundle = {tunnel_ca}",
+                "heartbeat_seconds = 30",
+                "reconnect_backoff_max_seconds = 300",
+                "",
+                "[proxy]",
+                "target = 127.0.0.1:2222",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = load_agent_config(config_path)
+
+    assert config.config_path == config_path
+    assert config.identity_path == tmp_path / "identity" / "identity.json"
+    assert config.enrollment_token == "raw-token"
+    assert config.enrollment_tls_ca_bundle == enrollment_ca
+    assert config.tunnel_tls_ca_bundle == tunnel_ca
+    assert config.proxy_target_host == "127.0.0.1"
+    assert config.proxy_target_port == 2222
+
+
 def _server_config(
     tmp_path: Path,
     *,
@@ -160,6 +213,7 @@ def _server_config(
     ldap: LdapConfig | None = None,
     keyboard_interactive_verifier: str | None = "ldap",
     public_key_entries: tuple[FilePublicKeyEntry, ...] | None = None,
+    metrics_listen: str = "127.0.0.1:9100",
 ) -> ServerConfig:
     server_dir = tmp_path / "server"
     secrets_dir = server_dir / "secrets"
@@ -215,7 +269,7 @@ def _server_config(
             retention_days=30,
             integrity_key_path=replay_key,
         ),
-        metrics=MetricsConfig(listen="127.0.0.1:9100"),
+        metrics=MetricsConfig(listen=metrics_listen),
         install_dirs=(server_dir, state_dir, replay_dir),
         secret_paths=(agent_ca_key, user_ca_key, replay_key),
     )

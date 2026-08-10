@@ -20,6 +20,7 @@ class AuditEventType(str, Enum):
     """Minimum audit event types required by the specification."""
 
     ENROLLMENT_TOKEN_CREATED = "enrollment_token_created"
+    ENROLLMENT_TOKEN_EXPIRED = "enrollment_token_expired"
     ENROLLMENT_SUCCEEDED = "enrollment_succeeded"
     ENROLLMENT_FAILED = "enrollment_failed"
     AGENT_TUNNEL_CONNECTED = "agent_tunnel_connected"
@@ -51,6 +52,7 @@ class TunnelFrameType(str, Enum):
     RESIZE_PTY = "resize_pty"
     CLOSE_SESSION = "close_session"
     RENEW_AGENT_CERT = "renew_agent_cert"
+    ROTATE_TUNNEL_SECRET = "rotate_tunnel_secret"
     ERROR = "error"
 
 

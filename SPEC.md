@@ -65,6 +65,13 @@ Threats in scope:
 
 Default posture:
 - Deny access when identity, authorization, revocation, or tunnel state is uncertain.
+- Every connection boundary MUST fail closed. This includes user SSH, enrollment HTTPS,
+  tunnel mTLS, tunnel frame authentication, server-to-node SSH, LDAP, Azure AD,
+  PostgreSQL, replay storage, and health/metrics exposure. If authentication,
+  authorization, certificate validation, host-key validation, revocation lookup,
+  freshness checks, policy lookup, or persistence cannot complete conclusively, the
+  implementation MUST deny or terminate the connection rather than continue with
+  cached, partial, permissive, or unknown state.
 - Never log private keys, enrollment tokens, tunnel secrets, bearer tokens, passwords,
   replay payloads, or raw auth provider responses containing credentials.
 - Prefer explicit allowlists over parsing arbitrary user-provided shell commands.
@@ -392,15 +399,18 @@ User certificate hardening:
   serialization/signing; X.509 certificates are never presented to node sshd.
 
 Node sshd prerequisites:
-- Node-local user accounts must already exist for authorized usernames; account
-  provisioning is outside VibeConnect v1.
+- Node-local user accounts must already exist for authorized usernames. VibeConnect
+  user certificates and `TrustedUserCAKeys` replace per-user `authorized_keys` for
+  VibeConnect access, but they do not create Unix accounts or remove sshd's need for a
+  local UID. Account provisioning is outside VibeConnect v1.
 - The node sshd host public key must be captured during enrollment and remain stable
   until an administrator intentionally updates the stored host key.
 - `sshd` listens only on `127.0.0.1:2222`. IPv6 loopback is out of scope for v1 because
   the issued user certificate uses `source-address=127.0.0.0/8`.
 - `TrustedUserCAKeys /etc/ssh/vibeconnect-ca.pub` trusts only the server `user-ca`.
-- Principal matching uses `AuthorizedPrincipalsFile` or `AuthorizedPrincipalsCommand`
-  and must require the certificate principal to equal the target local username.
+- Principal matching uses `AuthorizedPrincipalsFile` or `AuthorizedPrincipalsCommand`,
+  not per-user `authorized_keys`, and must require the certificate principal to equal
+  the target local username.
 - `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, and
   `PubkeyAuthentication yes` are required for the VibeConnect listener.
 - `AllowTcpForwarding no`, `X11Forwarding no`, `AllowAgentForwarding no`, and SFTP
@@ -495,6 +505,24 @@ Observability:
 - Health/readiness endpoints bind to loopback by default. If exposed beyond loopback,
   deployment-layer authentication or network policy is mandatory.
 
+Post-v1 backlog - node account reconciliation:
+- Add periodic account reconciliation across managed nodes and the VibeConnect server.
+- Reconciliation compares LDAP/Azure AD group membership and VibeConnect authorization
+  state against local Unix account inventory.
+- Default cadence is an hourly scan.
+- Default action is report-only. Disable-only mode may be enabled explicitly. Deletion
+  is a separate explicit action and is never the default.
+- Reconciliation may manage only accounts with an explicit VibeConnect ownership marker,
+  configured username prefix, or configured allowlist. It MUST NOT manage arbitrary
+  local system accounts.
+- Protected accounts are always denied for disable and delete actions: `root`, `vibe`,
+  service users, database users, sshd users, and configured local administrators.
+- Deleting home directories, mail spools, crontabs, SSH state, passwd/shadow entries,
+  or related user state is destructive and requires explicit policy controls, dry-run
+  reporting, audit events, and separate operator approval.
+- Initial implementation should inventory and report drift only. Any account disable or
+  delete behavior requires separate design review before being moved into a release.
+
 ## 9. Server config (`/etc/vibeconnectd/config.yaml`)
 
 Minimum config schema:
@@ -583,6 +611,10 @@ Agent config validation fails startup when:
   forwarding disables are present; agent removes enrollment token after successful
   enrollment; unsafe config permissions fail startup; permissive SSH host-key
   acceptance is impossible.
+- **Post-v1 account reconciliation backlog tests**: mocked LDAP/Azure AD membership
+  detects stale users; protected accounts are never disabled or deleted; report-only
+  mode makes no changes; delete mode requires explicit config and never deletes unowned
+  accounts; integration coverage keeps stale-user cleanup disabled by default.
 
 ## 11. Repository layout
 

@@ -1,0 +1,15 @@
+Port 2222
+ListenAddress 127.0.0.1
+HostKey /etc/ssh/ssh_host_ed25519_key
+TrustedUserCAKeys /etc/ssh/vibeconnect-ca.pub
+AuthorizedPrincipalsCommand none
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+AllowTcpForwarding no
+X11Forwarding no
+AllowAgentForwarding no
+PermitTunnel no
+PermitTTY yes
+PermitUserEnvironment no
+Subsystem sftp disabled

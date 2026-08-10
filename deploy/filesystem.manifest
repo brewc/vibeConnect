@@ -1,0 +1,11 @@
+# path owner group mode kind
+/etc/vibeconnectd root vibeconnectd 0750 dir
+/etc/vibeconnectd/config.yaml root vibeconnectd 0640 file
+/etc/vibeconnectd/secrets root vibeconnectd 0750 dir
+/var/lib/vibeconnectd vibeconnectd vibeconnectd 0750 dir
+/var/lib/vibeconnectd/replay vibeconnectd vibeconnectd 0700 dir
+/var/log/vibeconnectd vibeconnectd vibeconnectd 0750 dir
+/etc/vibeconnect root vibe 0750 dir
+/etc/vibeconnect/agent.conf root vibe 0640 file
+/var/lib/vibeconnect vibe vibe 0700 dir
+/var/lib/vibeconnect/identity.json vibe vibe 0600 file

@@ -82,7 +82,10 @@ def test_schema_defines_required_tables() -> None:
         "audit_events",
         "key_rotation_events",
     ):
-        assert f"CREATE TABLE {table_name}" in MIGRATION_SQL
+        if table_name == "schema_migrations":
+            assert "CREATE TABLE IF NOT EXISTS schema_migrations" in MIGRATION_SQL
+        else:
+            assert f"CREATE TABLE {table_name}" in MIGRATION_SQL
 
 
 def test_schema_enforces_security_constraints() -> None:

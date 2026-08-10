@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import json
 import uuid
+from typing import cast
 
+import asyncssh
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
@@ -17,6 +21,9 @@ from server.tunnel import (
     AgentTunnelRecord,
     HeartbeatState,
     InMemoryAgentTunnelStore,
+    PeerCertificateBinding,
+    PostgresAgentTunnelStore,
+    ServerTunnelBroker,
     TunnelAuthenticator,
     TunnelAuthError,
     TunnelAuthRequest,
@@ -24,13 +31,16 @@ from server.tunnel import (
     TunnelChannelRegistry,
     TunnelStateError,
     apply_channel_frame,
+    build_tunnel_server_ssl_context,
 )
 from vibeconnect_common.crypto import (
+    IssuedUserCertificate,
     SecretValue,
     generate_agent_private_key,
     sha256_hex,
 )
 from vibeconnect_common.models import TunnelFrameType
+from vibeconnect_common.tunnel import DecodedTunnelFrame, decode_frame, encode_frame
 
 _NOW = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
 
@@ -197,6 +207,192 @@ async def test_renew_agent_cert_success_and_revoked_denial() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_postgres_agent_tunnel_store_maps_schema_rows() -> None:
+    """The PostgreSQL tunnel store maps agent rows and renewal updates."""
+    agent_id = uuid.UUID("00000000-0000-0000-0000-000000000001")
+    connection = FakeAgentTunnelConnection(
+        rows=[
+            {
+                "id": agent_id,
+                "node_name": "node-01",
+                "x509_public_key": _PUBLIC_KEY,
+                "tunnel_secret_hash": "secret-hash",
+                "cert_serial": "cert-01",
+                "cert_expires_at": _NOW + dt.timedelta(hours=1),
+                "revoked": False,
+            }
+        ]
+    )
+    store = PostgresAgentTunnelStore(connection)
+
+    record = await store.get_agent(agent_id)
+    await store.update_agent_certificate(
+        agent_id=agent_id,
+        public_key_pem="new-pub",
+        cert_serial="cert-02",
+        expires_at=_NOW + dt.timedelta(hours=2),
+    )
+
+    assert record is not None
+    assert record.agent_id == agent_id
+    assert record.revoked_at is None
+    assert "FROM agents" in connection.fetches[0][0]
+    assert "revoked = false" in connection.executed[0][0]
+
+
+@pytest.mark.asyncio
+async def test_server_tunnel_broker_authenticates_stream_and_sends_auth_ok() -> None:
+    """The server tunnel broker accepts only a valid initial auth frame."""
+    agent_id = uuid.uuid4()
+    secret = SecretValue("super-secret")
+    broker = _broker(agent_id=agent_id, secret=secret)
+    reader = FakeTunnelReader(
+        _auth_frame(agent_id=agent_id, tunnel_secret=secret.reveal())
+    )
+    writer = FakeTunnelWriter()
+
+    await broker.handle_stream(
+        reader=reader,
+        writer=writer,
+        peer_certificate=_peer_binding(),
+        now=_NOW,
+    )
+
+    response = decode_frame(writer.data)
+    assert response.frame.type is TunnelFrameType.AUTH_OK
+    assert writer.closed
+
+
+@pytest.mark.asyncio
+async def test_server_tunnel_broker_requires_auth_frame_to_match_mtls_peer() -> None:
+    """Agent auth values must match the certificate proven by TLS."""
+    agent_id = uuid.uuid4()
+    secret = SecretValue("super-secret")
+    broker = _broker(agent_id=agent_id, secret=secret)
+    reader = FakeTunnelReader(
+        _auth_frame(agent_id=agent_id, tunnel_secret=secret.reveal())
+    )
+    writer = FakeTunnelWriter()
+
+    await broker.handle_stream(
+        reader=reader,
+        writer=writer,
+        peer_certificate=_peer_binding(cert_public_key="different"),
+        now=_NOW,
+    )
+
+    response = decode_frame(writer.data)
+    assert response.frame.type is TunnelFrameType.ERROR
+    with pytest.raises(TunnelStateError, match="not connected"):
+        broker.connector_for_agent(agent_id=agent_id, channel_id="channel-01")
+
+
+@pytest.mark.asyncio
+async def test_server_tunnel_broker_open_session_sends_agent_frame() -> None:
+    """Opening a jump channel sends an OPEN_SESSION frame to the agent tunnel."""
+    agent_id = uuid.uuid4()
+    secret = SecretValue("super-secret")
+    broker = _broker(agent_id=agent_id, secret=secret)
+    reader = BlockingTunnelReader()
+    writer = FakeTunnelWriter()
+    task = asyncio.create_task(
+        broker.handle_stream(
+            reader=reader,
+            writer=writer,
+            peer_certificate=_peer_binding(),
+            now=_NOW,
+        )
+    )
+    reader.feed(_auth_frame(agent_id=agent_id, tunnel_secret=secret.reveal()))
+    await writer.wait_for_writes(1)
+
+    await broker.open_session(
+        agent_id=agent_id,
+        channel_id="channel-01",
+        node_name="node-01",
+        node_ssh_host_public_key="ssh-ed25519 AAAATEST",
+        username="alice",
+        user_certificate=IssuedUserCertificate(
+            private_key=cast(asyncssh.SSHKey, None),
+            certificate=b"cert",
+            serial=1,
+            username="alice",
+            valid_after=_NOW,
+            valid_before=_NOW + dt.timedelta(hours=1),
+        ),
+    )
+
+    frames = _decode_frames(writer.data)
+    assert frames[0].frame.type is TunnelFrameType.AUTH_OK
+    assert frames[1].frame.type is TunnelFrameType.OPEN_SESSION
+    assert frames[1].frame.channel_id == "channel-01"
+    assert json.loads(frames[1].payload.decode("utf-8")) == {
+        "node_name": "node-01",
+        "username": "alice",
+    }
+
+    reader.feed_eof()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_duplicate_tunnel_does_not_drop_existing_connection() -> None:
+    """A rejected duplicate tunnel cannot evict the active tunnel."""
+    agent_id = uuid.uuid4()
+    secret = SecretValue("super-secret")
+    broker = _broker(agent_id=agent_id, secret=secret)
+    first_reader = BlockingTunnelReader()
+    first_writer = FakeTunnelWriter()
+    first_task = asyncio.create_task(
+        broker.handle_stream(
+            reader=first_reader,
+            writer=first_writer,
+            peer_certificate=_peer_binding(),
+            now=_NOW,
+        )
+    )
+    first_reader.feed(_auth_frame(agent_id=agent_id, tunnel_secret=secret.reveal()))
+    await first_writer.wait_for_writes(1)
+
+    duplicate_reader = FakeTunnelReader(
+        _auth_frame(agent_id=agent_id, tunnel_secret=secret.reveal())
+    )
+    duplicate_writer = FakeTunnelWriter()
+    await broker.handle_stream(
+        reader=duplicate_reader,
+        writer=duplicate_writer,
+        peer_certificate=_peer_binding(),
+        now=_NOW,
+    )
+
+    await broker.open_session(
+        agent_id=agent_id,
+        channel_id="channel-01",
+        node_name="node-01",
+        node_ssh_host_public_key="ssh-ed25519 AAAATEST",
+        username="alice",
+        user_certificate=_issued_user_certificate(username="alice"),
+    )
+
+    assert (
+        _decode_frames(first_writer.data)[1].frame.type is TunnelFrameType.OPEN_SESSION
+    )
+
+    first_reader.feed_eof()
+    await first_task
+
+
+def test_tunnel_server_ssl_context_requires_client_certs() -> None:
+    """The tunnel SSL helper fails closed when certificate files are missing."""
+    with pytest.raises(FileNotFoundError):
+        build_tunnel_server_ssl_context(
+            cert_path="/missing/server.crt",
+            key_path="/missing/server.key",
+            ca_bundle_path="/missing/ca.crt",
+        )
+
+
 def _record(
     *,
     agent_id: uuid.UUID,
@@ -257,6 +453,106 @@ def _replace_request(
     )
 
 
+class FakeAgentTunnelConnection:
+    """Capture PostgreSQL tunnel store calls."""
+
+    def __init__(self, *, rows: list[dict[str, object]]) -> None:
+        """Initialize queued fetch rows."""
+        self.rows = rows
+        self.fetches: list[tuple[str, tuple[object, ...]]] = []
+        self.executed: list[tuple[str, tuple[object, ...]]] = []
+
+    async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
+        """Record one fetchrow call."""
+        self.fetches.append((query, args))
+        return self.rows.pop(0) if self.rows else None
+
+    async def execute(self, query: str, *args: object) -> str:
+        """Record one execute call."""
+        self.executed.append((query, args))
+        return "OK"
+
+
+class FakeTunnelReader:
+    """Read a fixed byte stream and then raise EOF."""
+
+    def __init__(self, data: bytes) -> None:
+        """Initialize the stream buffer."""
+        self._buffer = bytearray(data)
+
+    async def readexactly(self, n: int) -> bytes:
+        """Return exactly `n` bytes or raise EOF."""
+        if len(self._buffer) < n:
+            raise asyncio.IncompleteReadError(bytes(self._buffer), n)
+        data = bytes(self._buffer[:n])
+        del self._buffer[:n]
+        return data
+
+
+class BlockingTunnelReader:
+    """Queue-backed tunnel reader for long-lived broker tests."""
+
+    def __init__(self) -> None:
+        """Initialize an empty stream."""
+        self._buffer = bytearray()
+        self._event = asyncio.Event()
+        self._eof = False
+
+    def feed(self, data: bytes) -> None:
+        """Append stream bytes and wake readers."""
+        self._buffer.extend(data)
+        self._event.set()
+
+    def feed_eof(self) -> None:
+        """Mark the stream EOF and wake readers."""
+        self._eof = True
+        self._event.set()
+
+    async def readexactly(self, n: int) -> bytes:
+        """Return exactly `n` bytes or raise EOF."""
+        while len(self._buffer) < n:
+            if self._eof:
+                raise asyncio.IncompleteReadError(bytes(self._buffer), n)
+            await self._event.wait()
+            self._event.clear()
+        data = bytes(self._buffer[:n])
+        del self._buffer[:n]
+        return data
+
+
+class FakeTunnelWriter:
+    """Capture framed tunnel writes."""
+
+    def __init__(self) -> None:
+        """Initialize captured bytes."""
+        self.data = b""
+        self.closed = False
+        self._write_count = 0
+        self._event = asyncio.Event()
+
+    def write(self, data: bytes) -> None:
+        """Capture a write."""
+        self.data += data
+        self._write_count += 1
+        self._event.set()
+
+    async def drain(self) -> None:
+        """No-op drain for tests."""
+
+    def close(self) -> None:
+        """Mark closed."""
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        """No-op wait for tests."""
+
+    async def wait_for_writes(self, count: int) -> None:
+        """Wait until at least `count` writes have been captured."""
+        while self._write_count < count:
+            await self._event.wait()
+            self._event.clear()
+
+
 def _datetime_value(value: object) -> dt.datetime:
     assert isinstance(value, dt.datetime)
     return value
@@ -265,6 +561,71 @@ def _datetime_value(value: object) -> dt.datetime:
 def _optional_datetime_value(value: object) -> dt.datetime | None:
     assert value is None or isinstance(value, dt.datetime)
     return value
+
+
+def _broker(*, agent_id: uuid.UUID, secret: SecretValue) -> ServerTunnelBroker:
+    record = _record(agent_id=agent_id, tunnel_secret_hash=sha256_hex(secret))
+    return ServerTunnelBroker(
+        authenticator=TunnelAuthenticator(InMemoryAgentTunnelStore({agent_id: record})),
+        max_sessions_per_agent=4,
+        heartbeat_seconds=30,
+        max_frame_bytes=1024 * 1024,
+    )
+
+
+def _auth_frame(*, agent_id: uuid.UUID, tunnel_secret: str) -> bytes:
+    payload = json.dumps(
+        {
+            "agent_id": str(agent_id),
+            "node_name": "node-01",
+            "cert_serial": "abc123",
+            "cert_public_key": _PUBLIC_KEY,
+            "tunnel_secret": tunnel_secret,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return encode_frame(
+        frame_type=TunnelFrameType.AUTH,
+        request_id="auth-01",
+        channel_id=None,
+        payload=payload,
+    )
+
+
+def _peer_binding(
+    *,
+    cert_serial: str = "abc123",
+    cert_public_key: str | None = None,
+) -> PeerCertificateBinding:
+    return PeerCertificateBinding(
+        cert_serial=cert_serial,
+        cert_public_key=_PUBLIC_KEY if cert_public_key is None else cert_public_key,
+    )
+
+
+def _decode_frames(data: bytes) -> list[DecodedTunnelFrame]:
+    frames: list[DecodedTunnelFrame] = []
+    buffer = data
+    while buffer:
+        header_length = int.from_bytes(buffer[:4], "big")
+        header_end = 4 + header_length
+        header = json.loads(buffer[4:header_end].decode("utf-8"))
+        payload_end = header_end + int(header["payload_length"])
+        frames.append(decode_frame(buffer[:payload_end]))
+        buffer = buffer[payload_end:]
+    return frames
+
+
+def _issued_user_certificate(*, username: str) -> IssuedUserCertificate:
+    return IssuedUserCertificate(
+        private_key=cast(asyncssh.SSHKey, None),
+        certificate=b"cert",
+        serial=1,
+        username=username,
+        valid_after=_NOW,
+        valid_before=_NOW + dt.timedelta(hours=1),
+    )
 
 
 def _public_key_pem() -> str:

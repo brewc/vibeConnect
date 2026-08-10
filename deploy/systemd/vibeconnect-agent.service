@@ -1,0 +1,20 @@
+[Unit]
+Description=VibeConnect node agent
+After=network-online.target ssh.service sshd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vibe
+Group=vibe
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/vibeconnect
+ExecStart=/usr/local/bin/vibeconnect-agent run --config /etc/vibeconnect/agent.conf
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

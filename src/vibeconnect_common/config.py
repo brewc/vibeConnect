@@ -5,14 +5,137 @@ from __future__ import annotations
 import ipaddress
 import os
 import stat
+from collections.abc import Mapping
+from configparser import ConfigParser, SectionProxy
 from pathlib import Path
+from urllib.parse import urlparse
+
+import yaml
 
 from vibeconnect_common.identifiers import validate_username_principal
-from vibeconnect_common.models import AgentConfig, FilePublicKeyEntry, ServerConfig
+from vibeconnect_common.models import (
+    AgentConfig,
+    AuthConfig,
+    AzureAdConfig,
+    CertConfig,
+    FilePublicKeyEntry,
+    LdapConfig,
+    MetricsConfig,
+    PublicKeyAuthConfig,
+    ReplayConfig,
+    ServerConfig,
+    TunnelConfig,
+)
 
 
 class ConfigError(ValueError):
     """Raised when configuration is unsafe or incomplete."""
+
+
+def load_agent_config(path: Path) -> AgentConfig:
+    """Load an agent config file into the typed config model."""
+    parser = ConfigParser()
+    if not parser.read(path):
+        raise ConfigError("agent.conf is missing")
+    enrollment = parser["enrollment"] if parser.has_section("enrollment") else {}
+    tunnel = parser["tunnel"] if parser.has_section("tunnel") else {}
+    identity = parser["identity"] if parser.has_section("identity") else {}
+    proxy = parser["proxy"] if parser.has_section("proxy") else {}
+    target_host, target_port = _parse_host_port(
+        _require_config_value(proxy, "target", "proxy.target")
+    )
+    enrollment_token = enrollment.get("token")
+    identity_path = Path(
+        identity.get("path", "/var/lib/vibeconnect/identity.json")
+    ).expanduser()
+    return AgentConfig(
+        config_path=path,
+        identity_path=identity_path,
+        enrollment_token=enrollment_token,
+        enrollment_completed=identity_path.exists(),
+        enrollment_tls_ca_bundle=Path(
+            enrollment.get(
+                "tls_ca_bundle",
+                _require_config_value(tunnel, "tls_ca_bundle", "tunnel.tls_ca_bundle"),
+            )
+        ).expanduser(),
+        tunnel_tls_ca_bundle=Path(
+            _require_config_value(tunnel, "tls_ca_bundle", "tunnel.tls_ca_bundle")
+        ).expanduser(),
+        proxy_target_host=target_host,
+        proxy_target_port=target_port,
+        heartbeat_seconds=int(tunnel.get("heartbeat_seconds", "30")),
+        reconnect_backoff_max_seconds=int(
+            tunnel.get("reconnect_backoff_max_seconds", "300")
+        ),
+    )
+
+
+def load_server_config(path: Path) -> ServerConfig:
+    """Load a server YAML config file into the typed config model."""
+    raw = _load_simple_yaml(path)
+    certs = _mapping(raw, "certs")
+    tunnel = _mapping(raw, "tunnel")
+    auth = _mapping(raw, "auth")
+    public_keys = _mapping(auth, "public_keys", default={})
+    ldap = _mapping(auth, "ldap", default={})
+    azure_ad = _mapping(auth, "azure_ad", default={})
+    replay = _mapping(raw, "replay")
+    metrics = _mapping(raw, "metrics")
+    return ServerConfig(
+        certs=CertConfig(
+            agent_ca_key_path=_path(certs, "agent_ca_key_path"),
+            agent_ca_cert_path=_path(certs, "agent_ca_cert_path"),
+            user_ca_key_path=_path(certs, "user_ca_key_path"),
+            user_ca_public_key_path=_path(certs, "user_ca_public_key_path"),
+            agent_cert_lifetime_days=_int(certs, "agent_cert_lifetime_days", 30),
+            user_cert_ttl_hours=_int(certs, "user_cert_ttl_hours", 4),
+        ),
+        tunnel=TunnelConfig(
+            max_sessions_per_agent=_int(tunnel, "max_sessions_per_agent", 64),
+            heartbeat_seconds=_int(tunnel, "heartbeat_seconds", 30),
+            frame_max_bytes=_int(tunnel, "frame_max_bytes", 1048576),
+            tls_ca_bundle=_path(tunnel, "tls_ca_bundle"),
+        ),
+        auth=AuthConfig(
+            public_keys=PublicKeyAuthConfig(
+                source=str(public_keys.get("source", "file")),
+                file_path=(
+                    Path(str(public_keys["file_path"])).expanduser()
+                    if public_keys.get("file_path")
+                    else None
+                ),
+                file_entries=(),
+            ),
+            ldap=LdapConfig(
+                enabled=_bool(ldap, "enabled", False),
+                use_tls=_bool(ldap, "use_tls", False),
+                validate_tls=_bool(ldap, "validate_tls", False),
+            ),
+            azure_ad=AzureAdConfig(
+                enabled=_bool(azure_ad, "enabled", False),
+                client_secret_path=(
+                    Path(str(azure_ad["client_secret_path"])).expanduser()
+                    if azure_ad.get("client_secret_path")
+                    else None
+                ),
+                use_managed_identity=_bool(azure_ad, "use_managed_identity", False),
+            ),
+            keyboard_interactive_verifier=(
+                str(auth["keyboard_interactive_verifier"])
+                if auth.get("keyboard_interactive_verifier")
+                else None
+            ),
+        ),
+        replay=ReplayConfig(
+            directory=_path(replay, "directory"),
+            retention_days=_int(replay, "retention_days", 90),
+            integrity_key_path=_path(replay, "integrity_key_path"),
+        ),
+        metrics=MetricsConfig(listen=str(metrics.get("listen", "127.0.0.1:9100"))),
+        install_dirs=tuple(_paths(raw, "install_dirs")),
+        secret_paths=tuple(_paths(raw, "secret_paths")),
+    )
 
 
 def validate_server_config(config: ServerConfig) -> None:
@@ -44,6 +167,7 @@ def validate_server_config(config: ServerConfig) -> None:
         raise ConfigError("user_cert_ttl_hours must be between 1 and 12")
     _validate_tunnel_bounds(config)
     _validate_auth_config(config)
+    _validate_metrics_listen(config.metrics.listen)
 
 
 def validate_agent_config(
@@ -123,6 +247,17 @@ def _validate_auth_config(config: ServerConfig) -> None:
         _validate_file_public_key_entries(config.auth.public_keys.file_entries)
 
 
+def _validate_metrics_listen(listen: str) -> None:
+    host, separator, port_text = listen.rpartition(":")
+    if not separator or not host or not port_text.isdigit():
+        raise ConfigError("metrics.listen must be host:port")
+    if not _is_ipv4_loopback(host):
+        raise ConfigError("metrics.listen must bind to IPv4 loopback by default")
+    port = int(port_text)
+    if not 1 <= port <= 65535:
+        raise ConfigError("metrics.listen port is outside valid TCP port bounds")
+
+
 def _validate_file_public_key_entries(entries: tuple[FilePublicKeyEntry, ...]) -> None:
     seen: dict[str, str] = {}
     for entry in entries:
@@ -185,3 +320,76 @@ def _is_ipv4_loopback(value: str) -> bool:
     except ValueError:
         return False
     return address.version == 4 and address.is_loopback
+
+
+def _require_config_value(
+    section: Mapping[str, str] | SectionProxy, key: str, display_name: str
+) -> str:
+    value = section.get(key)
+    if not value:
+        raise ConfigError(f"{display_name} is required")
+    return str(value)
+
+
+def _parse_host_port(value: str) -> tuple[str, int]:
+    parsed = urlparse(f"//{value}")
+    if not parsed.hostname or parsed.port is None:
+        raise ConfigError("host:port value is required")
+    return parsed.hostname, parsed.port
+
+
+def _load_simple_yaml(path: Path) -> dict[str, object]:
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ConfigError("server config YAML is invalid") from exc
+    if not isinstance(loaded, dict):
+        raise ConfigError("server config must be a YAML mapping")
+    return dict(loaded)
+
+
+def _mapping(
+    mapping: Mapping[str, object],
+    key: str,
+    *,
+    default: Mapping[str, object] | None = None,
+) -> Mapping[str, object]:
+    value = mapping.get(key, default)
+    if not isinstance(value, Mapping):
+        raise ConfigError(f"{key} section is required")
+    return value
+
+
+def _path(mapping: Mapping[str, object], key: str) -> Path:
+    value = mapping.get(key)
+    if not value:
+        raise ConfigError(f"{key} is required")
+    return Path(str(value)).expanduser()
+
+
+def _paths(mapping: Mapping[str, object], key: str) -> list[Path]:
+    value = mapping.get(key, "")
+    if not value:
+        return []
+    return [Path(item.strip()).expanduser() for item in str(value).split(",")]
+
+
+def _int(mapping: Mapping[str, object], key: str, default: int) -> int:
+    value = mapping.get(key, default)
+    if isinstance(value, bool):
+        raise ConfigError(f"{key} must be an integer")
+    try:
+        return int(str(value))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{key} must be an integer") from exc
+
+
+def _bool(mapping: Mapping[str, object], key: str, default: bool) -> bool:
+    value = mapping.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if str(value).lower() in {"true", "yes", "1"}:
+        return True
+    if str(value).lower() in {"false", "no", "0"}:
+        return False
+    raise ConfigError(f"{key} must be a boolean")

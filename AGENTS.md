@@ -59,6 +59,11 @@ For multi-step work, state a brief numbered plan with a verify step per step.
 3. Agent tunnel auth requires BOTH an mTLS certificate (signed by `agent-ca`) **AND** a matching `tunnel_secret`.
 4. User certs issued by the server MUST have `principals = [username]` so impersonation is impossible.
 5. Agent process MUST run as a non-root user (`vibe`). Server MUST run as root (binds port 22).
+6. Every connection boundary MUST fail closed. User SSH, enrollment HTTPS, tunnel mTLS,
+   tunnel frames, server-to-node SSH, LDAP, Azure AD, PostgreSQL, replay storage, and
+   health/metrics exposure must deny or terminate when authentication, authorization,
+   certificate validation, host-key validation, revocation, freshness, policy lookup,
+   or persistence is uncertain.
 
 ### Directory layout
 ```

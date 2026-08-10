@@ -6,6 +6,7 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import uuid
 from collections.abc import Mapping
 from typing import Any
 
@@ -22,6 +23,8 @@ from server.enrollment import (
     EnrollmentRequest,
     EnrollmentService,
     InMemoryEnrollmentStore,
+    PostgresEnrollmentStore,
+    StoredAgent,
 )
 from vibeconnect_common.audit import AuditWriter
 from vibeconnect_common.crypto import (
@@ -258,6 +261,47 @@ def _agent_ca() -> tuple[Ed25519PrivateKey, x509.Certificate]:
     return key, cert
 
 
+@pytest.mark.asyncio
+async def test_postgres_enrollment_store_uses_single_use_token_updates() -> None:
+    """The PostgreSQL enrollment store atomically consumes active tokens."""
+    connection = FakeEnrollmentConnection(
+        rows=[{"token_hash": "hash-01", "node_name": "node-01"}]
+    )
+    store = PostgresEnrollmentStore(connection)
+    now = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+
+    await store.create_enrollment_token(
+        token_hash="hash-01",
+        node_name="node-01",
+        labels=("prod",),
+        created_by="admin",
+        expires_at=now + dt.timedelta(days=7),
+    )
+    consumed = await store.consume_enrollment_token(
+        token_hash="hash-01", node_name="node-01", now=now
+    )
+    await store.persist_agent(
+        StoredAgent(
+            agent_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
+            node_name="node-01",
+            x509_public_key="agent-pub",
+            node_ssh_host_public_key=_NODE_HOST_KEY,
+            tunnel_secret_hash="secret-hash",
+            cert_serial="cert-01",
+            cert_expires_at=now + dt.timedelta(hours=1),
+        )
+    )
+
+    assert consumed is not None
+    assert consumed.node_name == "node-01"
+    assert len(connection.executed) == 4
+    assert "disabled_at IS NULL" in connection.executed[0][0]
+    assert "INSERT INTO enrollment_tokens" in connection.executed[1][0]
+    assert "INSERT INTO agents" in connection.executed[2][0]
+    assert "used = false" in connection.fetches[0][0]
+    assert "expires_at > $3" in connection.fetches[0][0]
+
+
 def _last_inserted_metadata(connection: FakeAuditConnection) -> Mapping[str, Any]:
     _query, args = connection.executed[-1]
     metadata = args[7]
@@ -265,6 +309,26 @@ def _last_inserted_metadata(connection: FakeAuditConnection) -> Mapping[str, Any
     decoded = json.loads(metadata)
     assert isinstance(decoded, dict)
     return decoded
+
+
+class FakeEnrollmentConnection:
+    """Capture PostgreSQL enrollment store calls."""
+
+    def __init__(self, *, rows: list[Mapping[str, object]]) -> None:
+        """Initialize queued fetch rows."""
+        self.rows = rows
+        self.executed: list[tuple[str, tuple[object, ...]]] = []
+        self.fetches: list[tuple[str, tuple[object, ...]]] = []
+
+    async def execute(self, query: str, *args: object) -> str:
+        """Record an execute call."""
+        self.executed.append((query, args))
+        return "OK"
+
+    async def fetchrow(self, query: str, *args: object) -> Mapping[str, object] | None:
+        """Record a fetchrow call."""
+        self.fetches.append((query, args))
+        return self.rows.pop(0) if self.rows else None
 
 
 _NODE_HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINodeHostKey node-01"

@@ -7,11 +7,14 @@ import struct
 
 import pytest
 
+from vibeconnect_common.crypto import SecretValue
 from vibeconnect_common.models import TunnelFrameType
 from vibeconnect_common.tunnel import (
     TunnelProtocolError,
     decode_frame,
+    decode_tunnel_secret_rotation,
     encode_frame,
+    encode_tunnel_secret_rotation,
 )
 
 
@@ -87,3 +90,58 @@ def test_tunnel_frame_rejects_unknown_type() -> None:
 
     with pytest.raises(TunnelProtocolError, match="unknown frame type"):
         decode_frame(struct.pack("!I", len(header)) + header)
+
+
+def test_tunnel_secret_rotation_round_trips_control_frame() -> None:
+    """Tunnel secret rotation travels only as an authenticated control frame."""
+    encoded = encode_tunnel_secret_rotation(
+        request_id="rotate-01",
+        node_name="node-01",
+        tunnel_secret=SecretValue("new-secret"),
+    )
+
+    decoded_frame = decode_frame(encoded)
+    decoded_payload = decode_tunnel_secret_rotation(encoded)
+
+    assert decoded_frame.frame.type is TunnelFrameType.ROTATE_TUNNEL_SECRET
+    assert decoded_frame.frame.channel_id is None
+    assert decoded_payload.request_id == "rotate-01"
+    assert decoded_payload.node_name == "node-01"
+    assert decoded_payload.tunnel_secret.reveal() == "new-secret"
+
+
+def test_tunnel_secret_rotation_rejects_session_channel_frames() -> None:
+    """Secret rotation cannot be sent as session data or over a PTY channel."""
+    bad_frame = encode_frame(
+        frame_type=TunnelFrameType.ROTATE_TUNNEL_SECRET,
+        request_id="rotate-01",
+        channel_id="chan-01",
+        payload=b'{"node_name":"node-01","tunnel_secret":"new-secret"}',
+    )
+
+    with pytest.raises(TunnelProtocolError, match="control frame"):
+        decode_tunnel_secret_rotation(bad_frame)
+
+
+@pytest.mark.parametrize(
+    "payload,match",
+    [
+        (b"not-json", "payload is invalid"),
+        (b"[]", "payload must be an object"),
+        (b'{"tunnel_secret":"new-secret"}', "node_name"),
+        (b'{"node_name":"node-01","tunnel_secret":""}', "tunnel_secret"),
+    ],
+)
+def test_tunnel_secret_rotation_rejects_malformed_payloads(
+    payload: bytes, match: str
+) -> None:
+    """Malformed secret-rotation payloads fail before state changes."""
+    frame = encode_frame(
+        frame_type=TunnelFrameType.ROTATE_TUNNEL_SECRET,
+        request_id="rotate-01",
+        channel_id=None,
+        payload=payload,
+    )
+
+    with pytest.raises(TunnelProtocolError, match=match):
+        decode_tunnel_secret_rotation(frame)

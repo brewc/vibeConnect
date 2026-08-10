@@ -6,6 +6,8 @@ import json
 import struct
 from dataclasses import dataclass
 
+from vibeconnect_common.crypto import SecretValue
+from vibeconnect_common.identifiers import validate_node_name
 from vibeconnect_common.models import TunnelFrame, TunnelFrameType
 
 FRAME_HEADER_MAX_BYTES = 16 * 1024
@@ -22,6 +24,15 @@ class DecodedTunnelFrame:
 
     frame: TunnelFrame
     payload: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class TunnelSecretRotation:
+    """Decoded authenticated tunnel-secret rotation control payload."""
+
+    request_id: str
+    node_name: str
+    tunnel_secret: SecretValue
 
 
 def encode_frame(
@@ -92,6 +103,59 @@ def decode_frame(
             payload_length=payload_length,
         ),
         payload=payload,
+    )
+
+
+def encode_tunnel_secret_rotation(
+    *,
+    request_id: str,
+    node_name: str,
+    tunnel_secret: SecretValue,
+    max_frame_bytes: int = DEFAULT_FRAME_MAX_BYTES,
+) -> bytes:
+    """Encode a tunnel-secret rotation for an authenticated tunnel control stream."""
+    payload = json.dumps(
+        {
+            "node_name": validate_node_name(node_name),
+            "tunnel_secret": tunnel_secret.reveal(),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return encode_frame(
+        frame_type=TunnelFrameType.ROTATE_TUNNEL_SECRET,
+        request_id=request_id,
+        channel_id=None,
+        payload=payload,
+        max_frame_bytes=max_frame_bytes,
+    )
+
+
+def decode_tunnel_secret_rotation(
+    data: bytes, *, max_frame_bytes: int = DEFAULT_FRAME_MAX_BYTES
+) -> TunnelSecretRotation:
+    """Decode a tunnel-secret rotation frame and reject unsafe variants."""
+    decoded = decode_frame(data, max_frame_bytes=max_frame_bytes)
+    if decoded.frame.type is not TunnelFrameType.ROTATE_TUNNEL_SECRET:
+        raise TunnelProtocolError("frame is not a tunnel-secret rotation")
+    if decoded.frame.channel_id is not None:
+        raise TunnelProtocolError("tunnel-secret rotation must be a control frame")
+    try:
+        payload = json.loads(decoded.payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TunnelProtocolError("tunnel-secret rotation payload is invalid") from exc
+    if not isinstance(payload, dict):
+        raise TunnelProtocolError("tunnel-secret rotation payload must be an object")
+    node_name = payload.get("node_name")
+    tunnel_secret = payload.get("tunnel_secret")
+    if not isinstance(node_name, str):
+        raise TunnelProtocolError("node_name is required")
+    if not isinstance(tunnel_secret, str) or not tunnel_secret:
+        raise TunnelProtocolError("tunnel_secret is required")
+    return TunnelSecretRotation(
+        request_id=decoded.frame.request_id,
+        node_name=validate_node_name(node_name),
+        tunnel_secret=SecretValue(tunnel_secret),
     )
 
 
