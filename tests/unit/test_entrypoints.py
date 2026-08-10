@@ -22,6 +22,23 @@ def test_server_entrypoint_returns_success() -> None:
     assert server_main_module.main([]) == 0
 
 
+def test_server_help_describes_subcommands(capsys: pytest.CaptureFixture[str]) -> None:
+    """Top-level server help explains each positional subcommand."""
+    with pytest.raises(SystemExit) as exc_info:
+        server_main_module.main(["--help"])
+
+    assert exc_info.value.code == 0
+    output = capsys.readouterr().out
+    normalized = " ".join(output.split())
+    assert "Manage and run the vibeConnect bastion server." in normalized
+    assert "start" in normalized
+    assert "run the bastion server listeners from config.yaml" in normalized
+    assert "connect-agent" in normalized
+    assert "launch OpenSSH to connect through the bastion to one agent" in normalized
+    assert "list-agents" in normalized
+    assert "list enrolled agents and their registration status" in normalized
+
+
 def test_server_migrate_requires_postgres_dsn() -> None:
     """Migration bootstrap needs an explicit Postgres DSN."""
     with pytest.raises(SystemExit):

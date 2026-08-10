@@ -91,6 +91,20 @@ from vibeconnect_common.models import ServerConfig, SessionStatus
 from vibeconnect_common.replay import ReplayWriter
 
 DEFAULT_MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
+_SERVER_CONFIG_DEFAULT = Path("/etc/vibeconnectd/config.yaml")
+
+_COMMAND_HELP = {
+    "start": "run the bastion server listeners from config.yaml",
+    "migrate": "apply database migrations using the configured Postgres DSN",
+    "connect-agent": "launch OpenSSH to connect through the bastion to one agent",
+    "create-agent": "create a one-time enrollment package for an agent node",
+    "list-agents": "list enrolled agents and their registration status",
+    "revoke-agent": "revoke an enrolled agent by node name",
+    "rotate-tunnel-secret": "rotate an agent's tunnel secret without printing it",
+    "update-node-host-key": "replace the pinned SSH host key for a node",
+    "expire-token": "expire unused enrollment tokens for a node",
+    "list-sessions": "list recorded SSH jump sessions",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,33 +186,62 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="vibeconnect-server")
-    subcommands = parser.add_subparsers(dest="command")
-    start = subcommands.add_parser("start")
+    parser = argparse.ArgumentParser(
+        prog="vibeconnect-server",
+        description="Manage and run the vibeConnect bastion server.",
+    )
+    subcommands = parser.add_subparsers(
+        dest="command",
+        metavar="COMMAND",
+        title="commands",
+    )
+    start = subcommands.add_parser(
+        "start",
+        help=_COMMAND_HELP["start"],
+        description=_COMMAND_HELP["start"],
+    )
     start.add_argument(
         "--config",
         type=Path,
-        default=Path("/etc/vibeconnectd/config.yaml"),
+        default=_SERVER_CONFIG_DEFAULT,
+        help="server config path (default: /etc/vibeconnectd/config.yaml)",
     )
-    migrate = subcommands.add_parser("migrate")
-    migrate.add_argument("--postgres-dsn")
+    migrate = subcommands.add_parser(
+        "migrate",
+        help=_COMMAND_HELP["migrate"],
+        description=_COMMAND_HELP["migrate"],
+    )
+    migrate.add_argument(
+        "--postgres-dsn",
+        help="Postgres DSN override; otherwise read from config/env",
+    )
     migrate.add_argument(
         "--config",
         type=Path,
-        default=Path("/etc/vibeconnectd/config.yaml"),
+        default=_SERVER_CONFIG_DEFAULT,
+        help="server config path (default: /etc/vibeconnectd/config.yaml)",
     )
     migrate.add_argument(
         "--migrations-dir",
         type=Path,
         default=DEFAULT_MIGRATIONS_DIR,
+        help="directory containing ordered SQL migrations",
     )
-    connect_agent = subcommands.add_parser("connect-agent")
-    connect_agent.add_argument("--server", required=True)
-    connect_agent.add_argument("--node-name", required=True)
-    connect_agent.add_argument("--user")
-    connect_agent.add_argument("--port", type=int, default=22)
-    connect_agent.add_argument("--identity-file", type=Path)
-    connect_agent.add_argument("--dry-run", action="store_true")
+    connect_agent = subcommands.add_parser(
+        "connect-agent",
+        help=_COMMAND_HELP["connect-agent"],
+        description=_COMMAND_HELP["connect-agent"],
+    )
+    connect_agent.add_argument("--server", required=True, help="bastion hostname")
+    connect_agent.add_argument("--node-name", required=True, help="registered agent")
+    connect_agent.add_argument("--user", help="SSH username")
+    connect_agent.add_argument("--port", type=int, default=22, help="bastion SSH port")
+    connect_agent.add_argument("--identity-file", type=Path, help="SSH identity file")
+    connect_agent.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the OpenSSH command without running it",
+    )
     for command in (
         "create-agent",
         "list-agents",
@@ -208,14 +251,26 @@ def _build_parser() -> argparse.ArgumentParser:
         "expire-token",
         "list-sessions",
     ):
-        admin = subcommands.add_parser(command)
-        admin.add_argument("--postgres-dsn")
+        admin = subcommands.add_parser(
+            command,
+            help=_COMMAND_HELP[command],
+            description=_COMMAND_HELP[command],
+        )
+        admin.add_argument(
+            "--postgres-dsn",
+            help="Postgres DSN override; otherwise read from config/env",
+        )
         admin.add_argument(
             "--config",
             type=Path,
-            default=Path("/etc/vibeconnectd/config.yaml"),
+            default=_SERVER_CONFIG_DEFAULT,
+            help="server config path (default: /etc/vibeconnectd/config.yaml)",
         )
-        admin.add_argument("--actor", default="local-admin")
+        admin.add_argument(
+            "--actor",
+            default="local-admin",
+            help="audit actor for local administrative changes",
+        )
         if command in {
             "create-agent",
             "revoke-agent",
@@ -223,20 +278,60 @@ def _build_parser() -> argparse.ArgumentParser:
             "update-node-host-key",
             "expire-token",
         }:
-            admin.add_argument("--node-name", required=True)
+            admin.add_argument(
+                "--node-name", required=True, help="registered node name"
+            )
         if command == "create-agent":
-            admin.add_argument("--label", action="append", default=[])
-            admin.add_argument("--server-host", default="server")
-            admin.add_argument("--enrollment-port", type=int, default=4443)
-            admin.add_argument("--tunnel-port", type=int, default=4444)
-            admin.add_argument("--proxy-host", default="127.0.0.1")
-            admin.add_argument("--proxy-port", type=int, default=2222)
-            admin.add_argument("--heartbeat-seconds", type=int, default=30)
+            admin.add_argument(
+                "--label",
+                action="append",
+                default=[],
+                help="agent authorization label; may be repeated",
+            )
+            admin.add_argument(
+                "--server-host",
+                default="server",
+                help="public server hostname for enrollment",
+            )
+            admin.add_argument(
+                "--enrollment-port",
+                type=int,
+                default=4443,
+                help="public enrollment API port",
+            )
+            admin.add_argument(
+                "--tunnel-port",
+                type=int,
+                default=4444,
+                help="public tunnel listener port",
+            )
+            admin.add_argument(
+                "--proxy-host",
+                default="127.0.0.1",
+                help="agent-local SSH proxy host",
+            )
+            admin.add_argument(
+                "--proxy-port",
+                type=int,
+                default=2222,
+                help="agent-local SSH proxy port",
+            )
+            admin.add_argument(
+                "--heartbeat-seconds",
+                type=int,
+                default=30,
+                help="agent tunnel heartbeat interval",
+            )
         if command == "update-node-host-key":
-            admin.add_argument("--host-key-file", type=Path, required=True)
+            admin.add_argument(
+                "--host-key-file",
+                type=Path,
+                required=True,
+                help="path to the node sshd public host key",
+            )
         if command == "list-sessions":
-            admin.add_argument("--node-name")
-            admin.add_argument("--user")
+            admin.add_argument("--node-name", help="filter sessions by node")
+            admin.add_argument("--user", help="filter sessions by username")
     return parser
 
 
