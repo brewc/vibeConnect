@@ -42,6 +42,10 @@ async def test_create_agent_returns_one_time_config_and_audits_hash_only() -> No
 
     assert isinstance(package, CreatedAgentPackage)
     assert "token =" in package.agent_conf
+    assert "tls_ca_bundle = /etc/vibeconnect/ca.crt" in package.agent_conf
+    assert "server_url = https://server:4444/tunnel" in package.agent_conf
+    assert "target = 127.0.0.1:2222" in package.agent_conf
+    assert "path = /var/lib/vibeconnect/identity.json" in package.agent_conf
     raw_token = package.agent_conf.split("token = ", 1)[1].splitlines()[0]
     assert raw_token
     assert store.created_tokens[0]["token_hash"] != raw_token
@@ -51,6 +55,30 @@ async def test_create_agent_returns_one_time_config_and_audits_hash_only() -> No
     assert metadata["token_hash"] == "[REDACTED]"
     assert raw_token not in json.dumps(metadata)
     assert stored_token_hash not in json.dumps(metadata)
+
+
+@pytest.mark.asyncio
+async def test_create_agent_renders_selected_server_host() -> None:
+    """Agent packages can target selected deployment addresses and ports."""
+    package = await AdminService(
+        store=FakeAdminStore(), audit_writer=None
+    ).create_agent(
+        node_name="node-01",
+        labels=["prod"],
+        actor="admin",
+        server_host="bastion.example.test",
+        enrollment_port=8443,
+        tunnel_port=9444,
+        proxy_host="127.0.0.2",
+        proxy_port=2200,
+        heartbeat_seconds=45,
+        now=_NOW,
+    )
+
+    assert "api_url = https://bastion.example.test:8443/enroll" in package.agent_conf
+    assert "server_url = https://bastion.example.test:9444/tunnel" in package.agent_conf
+    assert "heartbeat_seconds = 45" in package.agent_conf
+    assert "target = 127.0.0.2:2200" in package.agent_conf
 
 
 @pytest.mark.asyncio

@@ -65,6 +65,10 @@ async def test_create_agent_disables_prior_unused_token() -> None:
     assert store.tokens[second.token_hash]["disabled_at"] is None
     assert first.token.reveal() in first.agent_conf
     assert first.token_hash not in first.agent_conf
+    assert "tls_ca_bundle = /etc/vibeconnect/ca.crt" in first.agent_conf
+    assert "server_url = https://server:4444/tunnel" in first.agent_conf
+    assert "target = 127.0.0.1:2222" in first.agent_conf
+    assert "path = /var/lib/vibeconnect/identity.json" in first.agent_conf
 
 
 @pytest.mark.asyncio
@@ -73,7 +77,7 @@ async def test_enroll_success_persists_agent_and_response_shape() -> None:
     store = InMemoryEnrollmentStore()
     service = _service(store)
     package = await service.create_agent(
-        node_name="node-01", labels=(), created_by="admin"
+        node_name="node-01", labels=("env:prod",), created_by="admin"
     )
 
     response = await service.enroll(
@@ -92,6 +96,7 @@ async def test_enroll_success_persists_agent_and_response_shape() -> None:
     assert store.tokens[package.token_hash]["used"] is True
     stored_agent = next(iter(store.agents.values()))
     assert stored_agent.node_name == "node-01"
+    assert stored_agent.labels == ("env:prod",)
     assert stored_agent.node_ssh_host_public_key == _NODE_HOST_KEY
     assert stored_agent.tunnel_secret_hash != response.tunnel_secret.reveal()
     assert verify_secret_hash(response.tunnel_secret, stored_agent.tunnel_secret_hash)
@@ -265,7 +270,13 @@ def _agent_ca() -> tuple[Ed25519PrivateKey, x509.Certificate]:
 async def test_postgres_enrollment_store_uses_single_use_token_updates() -> None:
     """The PostgreSQL enrollment store atomically consumes active tokens."""
     connection = FakeEnrollmentConnection(
-        rows=[{"token_hash": "hash-01", "node_name": "node-01"}]
+        rows=[
+            {
+                "token_hash": "hash-01",
+                "node_name": "node-01",
+                "labels": '["prod"]',
+            }
+        ]
     )
     store = PostgresEnrollmentStore(connection)
     now = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
@@ -284,6 +295,7 @@ async def test_postgres_enrollment_store_uses_single_use_token_updates() -> None
         StoredAgent(
             agent_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
             node_name="node-01",
+            labels=("prod",),
             x509_public_key="agent-pub",
             node_ssh_host_public_key=_NODE_HOST_KEY,
             tunnel_secret_hash="secret-hash",
@@ -294,10 +306,13 @@ async def test_postgres_enrollment_store_uses_single_use_token_updates() -> None
 
     assert consumed is not None
     assert consumed.node_name == "node-01"
+    assert consumed.labels == ("prod",)
     assert len(connection.executed) == 4
     assert "disabled_at IS NULL" in connection.executed[0][0]
     assert "INSERT INTO enrollment_tokens" in connection.executed[1][0]
+    assert "labels" in connection.executed[1][0]
     assert "INSERT INTO agents" in connection.executed[2][0]
+    assert "labels" in connection.executed[2][0]
     assert "used = false" in connection.fetches[0][0]
     assert "expires_at > $3" in connection.fetches[0][0]
 

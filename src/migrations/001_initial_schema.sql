@@ -24,13 +24,15 @@ CREATE TABLE agents (
 CREATE TABLE enrollment_tokens (
     token_hash text PRIMARY KEY,
     node_name text NOT NULL,
+    labels jsonb NOT NULL DEFAULT '[]'::jsonb,
     created_by text NOT NULL,
     created_at timestamptz NOT NULL,
     expires_at timestamptz NOT NULL,
     used boolean NOT NULL DEFAULT false,
     used_at timestamptz,
     disabled_at timestamptz,
-    agent_id uuid REFERENCES agents(id)
+    agent_id uuid REFERENCES agents(id),
+    CONSTRAINT enrollment_tokens_labels_array CHECK (jsonb_typeof(labels) = 'array')
 );
 
 CREATE TABLE sessions (

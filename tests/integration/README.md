@@ -1,10 +1,5 @@
-# VibeConnect Integration Stack
+# VibeConnect Integration Fixtures
 
-Run the live container stack explicitly:
-
-```sh
-docker compose -f tests/integration/docker-compose.yml up --abort-on-container-exit
-```
-
-The default unit test gate validates this scaffold statically. Live container execution
-is reserved for the integration gate because it depends on local Docker availability.
+This directory keeps static Docker, LDAP, server, agent, and node fixtures for
+future integration work. The default unit test gate validates the fixture shape
+without trying to run a live container stack.

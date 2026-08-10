@@ -182,7 +182,7 @@ def test_load_agent_config_parses_agent_conf(tmp_path: Path) -> None:
                 f"path = {tmp_path / 'identity' / 'identity.json'}",
                 "",
                 "[tunnel]",
-                "server_url = tls://tunnel.example.test:12345",
+                "server_url = tls://tunnel.example.test:4444",
                 f"tls_ca_bundle = {tunnel_ca}",
                 "heartbeat_seconds = 30",
                 "reconnect_backoff_max_seconds = 300",
@@ -251,6 +251,7 @@ def _server_config(
             heartbeat_seconds=30,
             frame_max_bytes=1048576,
             tls_ca_bundle=tunnel_ca,
+            node_ssh_port=2222,
         ),
         auth=AuthConfig(
             public_keys=PublicKeyAuthConfig(

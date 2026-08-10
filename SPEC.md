@@ -5,7 +5,7 @@
 A bastion SSH gateway letting users jump from a central **server** through an **agent** on remote nodes.
 
 ```
-User --(SSH:22)--> Server --(mTLS tunnel)--> Agent --proxy--> sshd:2222 (on node)
+User --(SSH:configured, default 2222)--> Server --(mTLS tunnel)--> Agent --proxy--> sshd:2222 (on node)
 ```
 
 - **Server**: SSH endpoint; LDAP/Azure AD auth; issues short-lived user certs; bridges
@@ -20,7 +20,7 @@ User --(SSH:22)--> Server --(mTLS tunnel)--> Agent --proxy--> sshd:2222 (on node
 ## 2. Language & libraries
 
 - **Python 3.10+**
-- `asyncssh` — SSH server (port 22), SSH client (server→sshd over tunnel), and
+- `asyncssh` — SSH server (configured listener), SSH client (server→sshd over tunnel), and
   OpenSSH user certificate creation/signing.
 - `aiohttp` — HTTPS enrollment/API server and client using asyncio.
 - `asyncpg` — PostgreSQL persistence.
@@ -32,9 +32,9 @@ User --(SSH:22)--> Server --(mTLS tunnel)--> Agent --proxy--> sshd:2222 (on node
 Protocol choices:
 - Enrollment/API on port 4443 is HTTPS with JSON request/response bodies served by
   `aiohttp`.
-- The persistent tunnel on port 12345 is a custom framed virtual TCP protocol over
+- The persistent tunnel on port 4444 is a custom framed virtual TCP protocol over
   mTLS.
-- User-facing SSH on port 22 is implemented by `asyncssh`.
+- User-facing SSH on the configured listener is implemented by `asyncssh`.
 - Server-to-node SSH is also implemented by `asyncssh`, using a custom asyncio stream
   adapter backed by the framed tunnel. No local listening socket is created for this
   adapter.
@@ -61,7 +61,8 @@ Threats in scope:
 - Restricted-shell command injection or escape into arbitrary server-side commands.
 - Replay tampering, replay disclosure, and secrets typed into terminal sessions.
 - Database disclosure of token/secret hashes and session metadata.
-- Server process compromise impact, especially where root is required for port 22.
+- Server process compromise impact, especially where root or bind capabilities are
+  required for privileged configured ports.
 
 Default posture:
 - Deny access when identity, authorization, revocation, or tunnel state is uncertain.
@@ -218,7 +219,7 @@ Enrollment API:
 ## 5. Tunnel (persistent, agent↔server)
 
 Agent reconnects using `identity.json`:
-1. mTLS to `server:tunnel_port` (default 12345).
+1. mTLS to `server:tunnel_port` (default 4444).
 2. **Both required**: X.509 agent cert (verified vs `agent-ca`) + `tunnel_secret`
    (verified vs hash).
 3. Heartbeat every 30s; exponential backoff reconnect (cap 5 min).
@@ -286,7 +287,7 @@ Key and secret rotation:
 
 ## 6. User auth & authorization
 
-User SSHes to `server:22` (asyncssh server). Auth methods:
+User SSHes to `server:listen_ssh` (asyncssh server). Auth methods:
 - Public key (`validate_public_key`), or
 - Keyboard-interactive LDAP password.
 
@@ -453,17 +454,18 @@ Replay policy:
 
 ## 8. Runtime / deployment
 
-- Server: starts with enough privilege to listen on 22 (SSH), 12345 (mTLS tunnel),
-  and 4443 (enrollment/API), then runs request/session handling without long-term
-  root privileges.
+- Server: starts with enough privilege to listen on configured ports including
+  2222 (SSH), 4444 (mTLS tunnel), and 4443 (enrollment/API), then runs
+  request/session handling without unnecessary long-term privileges.
 - Agent: user `vibe` only; writes `identity.json` 0600; raw TCP proxy to
   `127.0.0.1:2222`.
 - Packaging: two PyInstaller binaries (`vibeconnect-server`, `vibeconnect-agent`)
   from one repo; shared `src/vibeconnect_common/`.
 
 Deployment hardening:
-- The server MUST avoid long-term root: bind port 22 using `CAP_NET_BIND_SERVICE`,
-  socket activation, or drop privileges immediately after binding.
+- The server MUST avoid unnecessary long-term root: use `CAP_NET_BIND_SERVICE`
+  only when a configured listener needs a privileged port, or use socket
+  activation/drop privileges immediately after binding.
 - Server CA private keys, auth provider credentials, and PostgreSQL DSNs are readable
   only by the server runtime user.
 - Agent `identity.json` is written under a `0700` directory, owned by `vibe`, with an
@@ -533,7 +535,7 @@ Minimum config schema:
   `certs.user_ca_key_path`, `certs.user_ca_public_key_path`,
   `certs.agent_cert_lifetime_days`, and `certs.user_cert_ttl_hours`.
 - `tunnel.max_sessions_per_agent`, `tunnel.heartbeat_seconds`,
-  `tunnel.frame_max_bytes`, and `tunnel.tls_ca_bundle`.
+  `tunnel.frame_max_bytes`, `tunnel.tls_ca_bundle`, and `tunnel.node_ssh_port`.
 - `auth.public_keys.source` (`ldap`, `azure_ad`, or `file`) and related source
   settings.
 - `auth.public_keys.file_path` when `auth.public_keys.source = file`.
@@ -574,8 +576,8 @@ Minimum agent config schema:
   certificates use `source-address=127.0.0.0/8`.
 
 Agent config validation fails startup when:
-- `agent.conf` is not owned by `root` or `vibe`, is readable by other users, or is not
-  readable by the `vibe` runtime user.
+- `agent.conf` is not owned by `vibe`, is readable by other users, or is not readable
+  by the `vibe` runtime user. The deployed mode is `0600`.
 - `identity.path` or its parent directory is not owned by `vibe` or has unsafe modes.
 - TLS CA bundle paths are missing or unreadable.
 - Proxy target host is not within `127.0.0.0/8`.

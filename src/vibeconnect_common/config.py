@@ -96,6 +96,7 @@ def load_server_config(path: Path) -> ServerConfig:
             heartbeat_seconds=_int(tunnel, "heartbeat_seconds", 30),
             frame_max_bytes=_int(tunnel, "frame_max_bytes", 1048576),
             tls_ca_bundle=_path(tunnel, "tls_ca_bundle"),
+            node_ssh_port=_int(tunnel, "node_ssh_port", 2222),
         ),
         auth=AuthConfig(
             public_keys=PublicKeyAuthConfig(
@@ -181,15 +182,15 @@ def validate_agent_config(
     Args:
         config: Agent configuration model.
         runtime_uid: UID expected to read runtime files. Defaults to current UID.
-        allowed_owner_uids: Allowed owners for `agent.conf`. Defaults to current UID
-            and root, which keeps tests portable before a `vibe` user exists.
+        allowed_owner_uids: Allowed owners for `agent.conf`. Defaults to the runtime
+            UID.
 
     Raises:
         ConfigError: If configuration is incomplete or unsafe.
     """
     actual_runtime_uid = os.getuid() if runtime_uid is None else runtime_uid
     actual_allowed_owners = (
-        frozenset({0, actual_runtime_uid})
+        frozenset({actual_runtime_uid})
         if allowed_owner_uids is None
         else allowed_owner_uids
     )
@@ -228,6 +229,8 @@ def _validate_tunnel_bounds(config: ServerConfig) -> None:
         raise ConfigError("heartbeat_seconds is outside documented bounds")
     if not 65536 <= config.tunnel.frame_max_bytes <= 16777216:
         raise ConfigError("frame_max_bytes is outside documented bounds")
+    if not 1 <= config.tunnel.node_ssh_port <= 65535:
+        raise ConfigError("node_ssh_port is outside valid TCP port bounds")
 
 
 def _validate_auth_config(config: ServerConfig) -> None:

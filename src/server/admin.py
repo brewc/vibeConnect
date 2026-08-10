@@ -165,12 +165,13 @@ class PostgresAdminStore:
         await self._connection.execute(
             """
             INSERT INTO enrollment_tokens(
-                token_hash, node_name, created_by, created_at, expires_at
+                token_hash, node_name, labels, created_by, created_at, expires_at
             )
-            VALUES($1, $2, $3, $4, $5)
+            VALUES($1, $2, $3::jsonb, $4, $5, $6)
             """,
             token_hash,
             node_name,
+            json.dumps(list(labels)),
             created_by,
             now,
             expires_at,
@@ -371,11 +372,24 @@ class AdminService:
         node_name: str,
         labels: Sequence[str],
         actor: str,
+        server_host: str = "server",
+        enrollment_port: int = 4443,
+        tunnel_port: int = 4444,
+        proxy_host: str = "127.0.0.1",
+        proxy_port: int = 2222,
+        heartbeat_seconds: int = 30,
         now: dt.datetime | None = None,
     ) -> CreatedAgentPackage:
         """Create a one-time enrollment package for an agent."""
         safe_node_name = validate_node_name(node_name)
         safe_labels = tuple(validate_label(label) for label in labels)
+        safe_server_host = _validate_server_host(server_host)
+        _validate_port(enrollment_port, "enrollment_port")
+        _validate_port(tunnel_port, "tunnel_port")
+        _validate_port(proxy_port, "proxy_port")
+        safe_proxy_host = _validate_proxy_host(proxy_host)
+        if not 5 <= heartbeat_seconds <= 300:
+            raise AdminError("heartbeat_seconds is outside documented bounds")
         actual_now = _utc_now() if now is None else _as_utc(now)
         token = generate_enrollment_token()
         token_hash = sha256_hex(token)
@@ -397,7 +411,16 @@ class AdminService:
         return CreatedAgentPackage(
             node_name=safe_node_name,
             labels=safe_labels,
-            agent_conf=_render_agent_conf(safe_node_name, token),
+            agent_conf=_render_agent_conf(
+                safe_node_name,
+                token,
+                server_host=safe_server_host,
+                enrollment_port=enrollment_port,
+                tunnel_port=tunnel_port,
+                proxy_host=safe_proxy_host,
+                proxy_port=proxy_port,
+                heartbeat_seconds=heartbeat_seconds,
+            ),
         )
 
     async def list_agents(self) -> tuple[AgentSummary, ...]:
@@ -636,16 +659,57 @@ def _require_overlap(
         raise AdminError("CA rotation requires overlapping trust bundle")
 
 
-def _render_agent_conf(node_name: str, token: SecretValue) -> str:
+def _render_agent_conf(
+    node_name: str,
+    token: SecretValue,
+    *,
+    server_host: str = "server",
+    enrollment_port: int = 4443,
+    tunnel_port: int = 4444,
+    proxy_host: str = "127.0.0.1",
+    proxy_port: int = 2222,
+    heartbeat_seconds: int = 30,
+) -> str:
     return "\n".join(
         [
             "[enrollment]",
             f"node_name = {node_name}",
             f"token = {token.reveal()}",
-            "api_url = https://server:4443/enroll",
+            f"api_url = https://{server_host}:{enrollment_port}/enroll",
+            "tls_ca_bundle = /etc/vibeconnect/ca.crt",
+            "",
+            "[tunnel]",
+            f"server_url = https://{server_host}:{tunnel_port}/tunnel",
+            "tls_ca_bundle = /etc/vibeconnect/ca.crt",
+            f"heartbeat_seconds = {heartbeat_seconds}",
+            "",
+            "[proxy]",
+            f"target = {proxy_host}:{proxy_port}",
+            "",
+            "[identity]",
+            "path = /var/lib/vibeconnect/identity.json",
             "",
         ]
     )
+
+
+def _validate_server_host(value: str) -> str:
+    if not value or value.startswith("-") or any(char.isspace() for char in value):
+        raise AdminError("invalid server host")
+    if "/" in value or ":" in value or "@" in value:
+        raise AdminError("invalid server host")
+    return value
+
+
+def _validate_proxy_host(value: str) -> str:
+    if not value.startswith("127.") or any(char.isspace() for char in value):
+        raise AdminError("invalid proxy host")
+    return value
+
+
+def _validate_port(value: int, label: str) -> None:
+    if not 1 <= value <= 65535:
+        raise AdminError(f"{label} is outside valid TCP port bounds")
 
 
 def _agent_summary(row: Mapping[str, object]) -> AgentSummary:

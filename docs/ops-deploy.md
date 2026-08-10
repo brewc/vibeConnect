@@ -46,22 +46,24 @@ The packaged deployment should create:
 | `/var/lib/vibeconnectd/replay` | `vibeconnectd:vibeconnectd` | `0700` | Replay files |
 | `/var/log/vibeconnectd` | `vibeconnectd:vibeconnectd` | `0750` | Server logs |
 | `/etc/vibeconnect` | `root:vibe` | `0750` | Agent config root |
-| `/etc/vibeconnect/agent.conf` | `root:vibe` | `0640` | Agent config |
+| `/etc/vibeconnect/agent.conf` | `vibe:vibe` | `0600` | Agent config |
 | `/var/lib/vibeconnect` | `vibe:vibe` | `0700` | Agent state |
 | `/var/lib/vibeconnect/identity.json` | `vibe:vibe` | `0600` | Agent identity |
 
 ## Database
 
-Create a PostgreSQL role and database, then export a real DSN:
+Create a PostgreSQL role and database, then store a real loopback DSN in the
+secret file referenced by `postgres.dsn_file`:
 
 ```sh
-export VIBECONNECT_POSTGRES_DSN='postgresql://vibeconnect:password@127.0.0.1:5432/vibeconnect'
+sudo install -o root -g vibeconnectd -m 0640 /dev/null /etc/vibeconnectd/secrets/postgres.dsn
+sudo sh -c "printf '%s\n' 'postgresql://vibeconnect:password@127.0.0.1:5432/vibeconnect' > /etc/vibeconnectd/secrets/postgres.dsn"
 ```
 
 Apply migrations:
 
 ```sh
-PYTHONPATH=src .venv/bin/python -m server.main migrate
+vibeconnect-server migrate
 ```
 
 Do not leave placeholder DSNs such as `USER`, `PASSWORD`, or `DBNAME`; PostgreSQL
@@ -78,7 +80,7 @@ Important defaults:
 
 - SSH user listener: `0.0.0.0:22`.
 - Enrollment/API: `:4443` by spec.
-- Tunnel listener: `:12345` by spec.
+- Tunnel listener: `:4444` by spec.
 - Health and metrics: `127.0.0.1:9100`.
 - Replay retention: 30 days.
 
@@ -126,37 +128,37 @@ for per-user `authorized_keys`; they do not create or own local accounts in v1.
 Create an enrollment package:
 
 ```sh
-PYTHONPATH=src .venv/bin/python -m server.main create-agent --node-name node-01 --label env:dev
+vibeconnect-server create-agent --node-name node-01 --label env:dev
 ```
 
 List agents:
 
 ```sh
-PYTHONPATH=src .venv/bin/python -m server.main list-agents
+vibeconnect-server list-agents
 ```
 
 Expire an unused token:
 
 ```sh
-PYTHONPATH=src .venv/bin/python -m server.main expire-token --node-name node-01
+vibeconnect-server expire-token --node-name node-01
 ```
 
 Revoke a node:
 
 ```sh
-PYTHONPATH=src .venv/bin/python -m server.main revoke-agent --node-name node-01
+vibeconnect-server revoke-agent --node-name node-01
 ```
 
 Rotate an agent tunnel secret:
 
 ```sh
-PYTHONPATH=src .venv/bin/python -m server.main rotate-tunnel-secret --node-name node-01
+vibeconnect-server rotate-tunnel-secret --node-name node-01
 ```
 
 Update a pinned node host key after a deliberate host key rotation:
 
 ```sh
-PYTHONPATH=src .venv/bin/python -m server.main update-node-host-key --node-name node-01 --host-key-file /etc/ssh/ssh_host_ed25519_key.pub
+vibeconnect-server update-node-host-key --node-name node-01 --host-key-file /etc/ssh/ssh_host_ed25519_key.pub
 ```
 
 ## Observability
@@ -197,4 +199,3 @@ Recommended rotation procedures:
 - Disable accounts before destructive cleanup. Deleting home directories, mail
   spools, cron entries, or passwd/shadow entries requires explicit policy and is
   post-v1 work.
-

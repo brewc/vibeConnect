@@ -104,7 +104,7 @@ async def test_start_asyncssh_server_defaults_to_port_22() -> None:
 async def test_ssh_server_public_key_auth_resolves_identity() -> None:
     """Public-key auth binds the AsyncSSH connection to one identity."""
     key = asyncssh.generate_private_key("ssh-ed25519")
-    public_key = key.export_public_key().decode("ascii")
+    public_key = key.export_public_key().decode("ascii").strip()
     resolver = FakeIdentityResolver(public_key=public_key)
     server = VibeConnectSshServer(identity_resolver=resolver)
 
@@ -133,7 +133,7 @@ async def test_ssh_server_public_key_auth_denies_unresolved_identity() -> None:
 async def test_restricted_shell_handler_starts_authorized_jump() -> None:
     """An authenticated exact node command starts a coordinated jump."""
     key = asyncssh.generate_private_key("ssh-ed25519")
-    public_key = key.export_public_key().decode("ascii")
+    public_key = key.export_public_key().decode("ascii").strip()
     server = VibeConnectSshServer(
         identity_resolver=FakeIdentityResolver(public_key=public_key),
     )
@@ -238,7 +238,7 @@ async def test_restricted_shell_session_relays_user_and_node_pty_bytes() -> None
     assert session.exec_requested("node-01")
     await node_connection.wait_for_process()
 
-    session.data_received(b"whoami\n", None)
+    session.data_received("whoami\n", None)
     node_connection.process.stdout.feed(b"alice\n")
     await user_channel.wait_for_writes(1)
 
@@ -246,9 +246,56 @@ async def test_restricted_shell_session_relays_user_and_node_pty_bytes() -> None
     await user_channel.wait_for_exit()
 
     assert node_connection.process.stdin.writes == [b"whoami\n"]
-    assert user_channel.writes == [b"alice\n"]
+    assert user_channel.writes == ["alice\n"]
     assert user_channel.exits == [0]
     assert user_channel.closed
+
+
+@pytest.mark.asyncio
+async def test_restricted_shell_session_buffers_input_until_jump_is_ready() -> None:
+    """Early client input is not dropped while the node SSH process starts."""
+    server = await _authenticated_server()
+    node_connection = FakeNodeConnection()
+    tunnel = FakeTunnelOpener(node_connection=node_connection)
+    session = RestrictedShellSession(
+        server=server,
+        handler_factory=lambda _: _handler(server=server, tunnel=tunnel),
+    )
+    user_channel = FakeUserChannel()
+    session.connection_made(user_channel)
+
+    assert session.exec_requested("node-01")
+    session.data_received(b"whoami\n", None)
+    await node_connection.wait_for_process()
+    await _wait_for_stdin(node_connection.process, count=1)
+
+    node_connection.process.finish()
+    await user_channel.wait_for_exit()
+
+    assert node_connection.process.stdin.writes == [b"whoami\n"]
+
+
+@pytest.mark.asyncio
+async def test_restricted_shell_session_buffers_eof_until_jump_is_ready() -> None:
+    """Early client EOF is forwarded after the node SSH process exists."""
+    server = await _authenticated_server()
+    node_connection = FakeNodeConnection()
+    tunnel = FakeTunnelOpener(node_connection=node_connection)
+    session = RestrictedShellSession(
+        server=server,
+        handler_factory=lambda _: _handler(server=server, tunnel=tunnel),
+    )
+    user_channel = FakeUserChannel()
+    session.connection_made(user_channel)
+
+    assert session.exec_requested("node-01")
+    assert not session.eof_received()
+    await node_connection.wait_for_process()
+
+    node_connection.process.finish()
+    await user_channel.wait_for_exit()
+
+    assert node_connection.process.stdin.eof
 
 
 class FakeAsyncSshListen:
@@ -625,7 +672,7 @@ class FakeAuditSink:
 
 async def _authenticated_server() -> VibeConnectSshServer:
     key = asyncssh.generate_private_key("ssh-ed25519")
-    public_key = key.export_public_key().decode("ascii")
+    public_key = key.export_public_key().decode("ascii").strip()
     server = VibeConnectSshServer(
         identity_resolver=FakeIdentityResolver(public_key=public_key),
     )
@@ -654,6 +701,14 @@ def _handler(
         ),
         clock=lambda: _NOW,
     )
+
+
+async def _wait_for_stdin(process: FakeNodeProcess, *, count: int) -> None:
+    for _attempt in range(100):
+        if len(process.stdin.writes) >= count:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("timed out waiting for process stdin")
 
 
 def _identity(*, public_key: str) -> ResolvedIdentity:

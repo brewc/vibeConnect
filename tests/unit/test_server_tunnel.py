@@ -6,7 +6,7 @@ import asyncio
 import datetime as dt
 import json
 import uuid
-from typing import cast
+from typing import Any, cast
 
 import asyncssh
 import pytest
@@ -39,8 +39,12 @@ from vibeconnect_common.crypto import (
     generate_agent_private_key,
     sha256_hex,
 )
-from vibeconnect_common.models import TunnelFrameType
-from vibeconnect_common.tunnel import DecodedTunnelFrame, decode_frame, encode_frame
+from vibeconnect_common.models import TunnelFrame, TunnelFrameType
+from vibeconnect_common.tunnel import (
+    DecodedTunnelFrame,
+    decode_frame,
+    encode_frame,
+)
 
 _NOW = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
 
@@ -233,12 +237,15 @@ async def test_postgres_agent_tunnel_store_maps_schema_rows() -> None:
         cert_serial="cert-02",
         expires_at=_NOW + dt.timedelta(hours=2),
     )
+    await store.update_last_seen(agent_id, _NOW)
 
     assert record is not None
     assert record.agent_id == agent_id
     assert record.revoked_at is None
     assert "FROM agents" in connection.fetches[0][0]
     assert "revoked = false" in connection.executed[0][0]
+    assert "last_seen = $2" in connection.executed[1][0]
+    assert connection.executed[1][1] == (agent_id, _NOW)
 
 
 @pytest.mark.asyncio
@@ -246,7 +253,15 @@ async def test_server_tunnel_broker_authenticates_stream_and_sends_auth_ok() -> 
     """The server tunnel broker accepts only a valid initial auth frame."""
     agent_id = uuid.uuid4()
     secret = SecretValue("super-secret")
-    broker = _broker(agent_id=agent_id, secret=secret)
+    store = InMemoryAgentTunnelStore(
+        {agent_id: _record(agent_id=agent_id, tunnel_secret_hash=sha256_hex(secret))}
+    )
+    broker = ServerTunnelBroker(
+        authenticator=TunnelAuthenticator(store),
+        max_sessions_per_agent=4,
+        heartbeat_seconds=30,
+        max_frame_bytes=1024 * 1024,
+    )
     reader = FakeTunnelReader(
         _auth_frame(agent_id=agent_id, tunnel_secret=secret.reveal())
     )
@@ -261,6 +276,7 @@ async def test_server_tunnel_broker_authenticates_stream_and_sends_auth_ok() -> 
 
     response = decode_frame(writer.data)
     assert response.frame.type is TunnelFrameType.AUTH_OK
+    assert agent_id in store.last_seen
     assert writer.closed
 
 
@@ -332,6 +348,68 @@ async def test_server_tunnel_broker_open_session_sends_agent_frame() -> None:
         "username": "alice",
     }
 
+    reader.feed_eof()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_broker_tunnel_stream_is_asyncssh_tunnel_transport() -> None:
+    """The broker stream exposes AsyncSSH's tunnel create_connection surface."""
+    agent_id = uuid.uuid4()
+    secret = SecretValue("super-secret")
+    broker = _broker(agent_id=agent_id, secret=secret)
+    reader = BlockingTunnelReader()
+    writer = FakeTunnelWriter()
+    task = asyncio.create_task(
+        broker.handle_stream(
+            reader=reader,
+            writer=writer,
+            peer_certificate=_peer_binding(),
+            now=_NOW,
+        )
+    )
+    reader.feed(_auth_frame(agent_id=agent_id, tunnel_secret=secret.reveal()))
+    await writer.wait_for_writes(1)
+    channel_id = "channel-01"
+    await broker.open_session(
+        agent_id=agent_id,
+        channel_id=channel_id,
+        node_name="node-01",
+        node_ssh_host_public_key="ssh-ed25519 AAAATEST",
+        username="alice",
+        user_certificate=_issued_user_certificate(username="alice"),
+    )
+    connector = broker.connector_for_agent(agent_id=agent_id, channel_id=channel_id)
+    protocol = FakeTunnelProtocol()
+
+    transport, returned_protocol = await cast(Any, connector).create_connection(
+        lambda: protocol, "node-01", 2222
+    )
+    transport.write(b"client-bytes")
+    await writer.wait_for_writes(3)
+    broker._handle_agent_frame(
+        broker._connections[agent_id],
+        DecodedTunnelFrame(
+            frame=TunnelFrame(
+                type=TunnelFrameType.SESSION_DATA,
+                request_id="response-01",
+                channel_id=channel_id,
+                payload_length=len(b"server-bytes"),
+            ),
+            payload=b"server-bytes",
+        ),
+    )
+    await protocol.wait_for_data()
+
+    assert returned_protocol is protocol
+    assert protocol.transport is transport
+    assert transport.get_extra_info("peername") == ("127.0.0.1", 2222)
+    assert protocol.received == b"server-bytes"
+    frames = _decode_frames(writer.data)
+    assert frames[2].frame.type is TunnelFrameType.SESSION_DATA
+    assert frames[2].payload == b"client-bytes"
+
+    transport.close()
     reader.feed_eof()
     await task
 
@@ -551,6 +629,36 @@ class FakeTunnelWriter:
         while self._write_count < count:
             await self._event.wait()
             self._event.clear()
+
+
+class FakeTunnelProtocol(asyncio.Protocol):
+    """Capture transport lifecycle and bytes from a broker transport."""
+
+    def __init__(self) -> None:
+        """Initialize captured protocol state."""
+        self.transport: asyncio.BaseTransport | None = None
+        self.received = b""
+        self.lost: Exception | None = None
+        self._data_event = asyncio.Event()
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        """Capture the transport."""
+        self.transport = transport
+
+    def data_received(self, data: bytes) -> None:
+        """Capture bytes from the transport."""
+        self.received += data
+        self._data_event.set()
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        """Capture transport closure."""
+        self.lost = exc
+
+    async def wait_for_data(self) -> None:
+        """Wait until at least one byte has been received."""
+        while not self.received:
+            await self._data_event.wait()
+            self._data_event.clear()
 
 
 def _datetime_value(value: object) -> dt.datetime:

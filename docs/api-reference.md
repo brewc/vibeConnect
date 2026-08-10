@@ -32,7 +32,7 @@ Response JSON:
   "agent_x509_cert": "-----BEGIN CERTIFICATE-----...",
   "tunnel_ca_bundle": "-----BEGIN CERTIFICATE-----...",
   "tunnel_host": "vibeconnect.example.test",
-  "tunnel_port": 12345,
+  "tunnel_port": 4444,
   "tunnel_secret": "generated-secret"
 }
 ```
@@ -115,13 +115,14 @@ representations.
 ## Server Admin CLI
 
 There is no remote admin API in v1. Administrative operations are local CLI calls
-against PostgreSQL. All commands accept `--postgres-dsn`; if omitted, the CLI uses
-`VIBECONNECT_POSTGRES_DSN`.
+against PostgreSQL. Admin commands read `/etc/vibeconnectd/config.yaml` by default
+and resolve the database from `postgres.dsn`, `postgres.dsn_file`, or
+`postgres.dsn_env`. `--postgres-dsn` remains available as an explicit override.
 
 Apply migrations:
 
 ```sh
-vibeconnect-server migrate --postgres-dsn postgresql://user:password@host:5432/db
+vibeconnect-server migrate
 ```
 
 Create an enrollment package:
@@ -170,4 +171,3 @@ vibeconnect-server list-sessions --user admin
 
 Admin commands write audit events with the supplied `--actor`, defaulting to
 `local-admin`.
-

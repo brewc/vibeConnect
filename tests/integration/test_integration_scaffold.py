@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parent
 
 
@@ -52,16 +50,3 @@ def test_integration_fixtures_include_user_node_and_group() -> None:
     assert "useradd --create-home --shell /bin/bash alice" in node_dockerfile
     assert "node_name = node-01" in agent_conf
     assert "target = 127.0.0.1:2222" in agent_conf
-
-
-@pytest.mark.integration
-def test_live_integration_command_is_documented() -> None:
-    """The live integration command remains explicit and opt-in."""
-    compose_path = ROOT / "docker-compose.yml"
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-
-    assert compose_path.exists()
-    assert (
-        "docker compose -f tests/integration/docker-compose.yml up "
-        "--abort-on-container-exit"
-    ) in readme

@@ -131,6 +131,7 @@ class TunnelConfig:
     heartbeat_seconds: int
     frame_max_bytes: int
     tls_ca_bundle: Path
+    node_ssh_port: int
 
 
 @dataclass(frozen=True, slots=True)

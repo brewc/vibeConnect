@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
 import uuid
 from collections import defaultdict, deque
 from collections.abc import Mapping, Sequence
@@ -56,6 +57,7 @@ class EnrollmentTokenRecord:
 
     token_hash: str
     node_name: str
+    labels: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +100,7 @@ class StoredAgent:
 
     agent_id: uuid.UUID
     node_name: str
+    labels: tuple[str, ...]
     x509_public_key: str
     node_ssh_host_public_key: str
     tunnel_secret_hash: str
@@ -170,11 +173,12 @@ class PostgresEnrollmentStore:
         await self._connection.execute(
             """
             INSERT INTO enrollment_tokens
-                (token_hash, node_name, created_by, created_at, expires_at)
-            VALUES ($1, $2, $3, $4, $5)
+                (token_hash, node_name, labels, created_by, created_at, expires_at)
+            VALUES ($1, $2, $3::jsonb, $4, $5, $6)
             """,
             token_hash,
             node_name,
+            json.dumps(list(labels)),
             created_by,
             now,
             _as_utc(expires_at),
@@ -193,7 +197,7 @@ class PostgresEnrollmentStore:
                AND used = false
                AND disabled_at IS NULL
                AND expires_at > $3
-            RETURNING token_hash, node_name
+            RETURNING token_hash, node_name, labels
             """,
             token_hash,
             node_name,
@@ -204,6 +208,7 @@ class PostgresEnrollmentStore:
         return EnrollmentTokenRecord(
             token_hash=str(row["token_hash"]),
             node_name=str(row["node_name"]),
+            labels=_labels(row["labels"]),
         )
 
     async def persist_agent(self, agent: StoredAgent) -> None:
@@ -214,6 +219,7 @@ class PostgresEnrollmentStore:
                 (
                     id,
                     node_name,
+                    labels,
                     x509_public_key,
                     node_ssh_host_public_key,
                     tunnel_secret_hash,
@@ -221,10 +227,11 @@ class PostgresEnrollmentStore:
                     cert_serial,
                     cert_expires_at
                 )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9)
             """,
             agent.agent_id,
             agent.node_name,
+            json.dumps(list(agent.labels)),
             agent.x509_public_key,
             agent.node_ssh_host_public_key,
             agent.tunnel_secret_hash,
@@ -298,7 +305,14 @@ class InMemoryEnrollmentStore:
                 return None
             row["used"] = True
             row["used_at"] = now
-            return EnrollmentTokenRecord(token_hash=token_hash, node_name=node_name)
+            labels = row["labels"]
+            if not isinstance(labels, tuple):
+                labels = tuple(labels) if isinstance(labels, list) else ()
+            return EnrollmentTokenRecord(
+                token_hash=token_hash,
+                node_name=node_name,
+                labels=tuple(str(label) for label in labels),
+            )
 
     async def persist_agent(self, agent: StoredAgent) -> None:
         """Persist an enrolled agent row."""
@@ -448,6 +462,7 @@ class EnrollmentService:
                 StoredAgent(
                     agent_id=agent_id,
                     node_name=safe_node_name,
+                    labels=record.labels,
                     x509_public_key=request.agent_x509_public_key,
                     node_ssh_host_public_key=request.node_ssh_host_public_key,
                     tunnel_secret_hash=sha256_hex(tunnel_secret),
@@ -534,6 +549,18 @@ def _render_agent_conf(node_name: str, token: SecretValue) -> str:
             f"node_name = {node_name}",
             f"token = {token.reveal()}",
             "api_url = https://server:4443/enroll",
+            "tls_ca_bundle = /etc/vibeconnect/ca.crt",
+            "",
+            "[tunnel]",
+            "server_url = https://server:4444/tunnel",
+            "tls_ca_bundle = /etc/vibeconnect/ca.crt",
+            "heartbeat_seconds = 30",
+            "",
+            "[proxy]",
+            "target = 127.0.0.1:2222",
+            "",
+            "[identity]",
+            "path = /var/lib/vibeconnect/identity.json",
             "",
         ]
     )
@@ -544,6 +571,13 @@ def _load_agent_public_key(public_key_pem: str) -> Ed25519PublicKey:
     if not isinstance(public_key, Ed25519PublicKey):
         raise EnrollmentError("agent public key must be Ed25519")
     return public_key
+
+
+def _labels(value: object) -> tuple[str, ...]:
+    loaded = json.loads(value) if isinstance(value, str) else value
+    if not isinstance(loaded, Sequence) or isinstance(loaded, (bytes, bytearray, str)):
+        raise EnrollmentError("enrollment labels must be an array")
+    return tuple(validate_label(str(label)) for label in loaded)
 
 
 def _best_effort_token_hash(token: str) -> str:

@@ -44,8 +44,10 @@ def require_tunnel_tls_context(context: SSLContext | None) -> SSLContext:
 
 def validate_proxy_target(host: str, port: int) -> ProxyTarget:
     """Allow raw TCP proxying only to the local node sshd."""
-    if host != "127.0.0.1" or port != 2222:
-        raise AgentTunnelError("agent proxy target must be 127.0.0.1:2222")
+    if not host.startswith("127."):
+        raise AgentTunnelError("agent proxy target must be IPv4 loopback")
+    if not 1 <= port <= 65535:
+        raise AgentTunnelError("agent proxy target port is outside TCP bounds")
     return ProxyTarget(host=host, port=port)
 
 
@@ -158,6 +160,8 @@ async def handle_agent_tunnel_stream(
                 return
             decoded = decode_frame(data, max_frame_bytes=max_frame_bytes)
             frame = decoded.frame
+            if frame.type is TunnelFrameType.AUTH_OK:
+                continue
             if frame.type is TunnelFrameType.HEARTBEAT:
                 await _write_frame(
                     tunnel_writer,

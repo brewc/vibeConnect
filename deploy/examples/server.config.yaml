@@ -1,6 +1,6 @@
 server:
   listen_ssh: 0.0.0.0:22
-  listen_tunnel: 0.0.0.0:12345
+  listen_tunnel: 0.0.0.0:4444
   listen_api: 0.0.0.0:4443
   tunnel_public_host: vibeconnect.example.test
   ssh_host_key_path: /etc/vibeconnectd/secrets/ssh_host_ed25519_key
@@ -8,7 +8,7 @@ server:
   tls_key_path: /etc/vibeconnectd/secrets/server_tls.key
 
 postgres:
-  dsn_env: VIBECONNECT_POSTGRES_DSN
+  dsn_file: /etc/vibeconnectd/secrets/postgres.dsn
 
 certs:
   agent_ca_key_path: /etc/vibeconnectd/secrets/agent_ca.key
@@ -23,6 +23,7 @@ tunnel:
   heartbeat_seconds: 30
   max_sessions_per_agent: 64
   frame_max_bytes: 1048576
+  node_ssh_port: 2222
 
 auth:
   public_keys:
@@ -45,4 +46,4 @@ metrics:
   listen: 127.0.0.1:9100
 
 install_dirs: /usr/local/bin,/etc/vibeconnectd,/var/lib/vibeconnectd
-secret_paths: /etc/vibeconnectd/secrets/agent_ca.key,/etc/vibeconnectd/secrets/user_ca.key,/etc/vibeconnectd/secrets/replay.key,/etc/vibeconnectd/secrets/server_tls.key
+secret_paths: /etc/vibeconnectd/secrets/agent_ca.key,/etc/vibeconnectd/secrets/user_ca.key,/etc/vibeconnectd/secrets/replay.key,/etc/vibeconnectd/secrets/server_tls.key,/etc/vibeconnectd/secrets/postgres.dsn

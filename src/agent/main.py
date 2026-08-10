@@ -83,7 +83,9 @@ def _build_parser() -> argparse.ArgumentParser:
 async def _run_enroll(config_path: Path) -> None:
     """Run one-time enrollment from an agent config file."""
     config = _load_enrollment_config(config_path)
-    host_key = _host_key_from_keyscan(await _run_ssh_keyscan("127.0.0.1", 2222))
+    host_key = _host_key_from_keyscan(
+        await _run_ssh_keyscan(config.proxy_target_host, config.proxy_target_port)
+    )
     payload = build_enrollment_payload(
         config=config,
         node_ssh_host_public_key=host_key,
@@ -154,6 +156,8 @@ def _load_enrollment_config(path: Path) -> AgentEnrollmentConfig:
     parser = _read_parser(path)
     enrollment = _section(parser, "enrollment")
     identity = parser["identity"] if parser.has_section("identity") else {}
+    proxy = _section(parser, "proxy")
+    proxy_host, proxy_port = _parse_host_port(_require(proxy, "target", "proxy.target"))
     return AgentEnrollmentConfig(
         node_name=_require(enrollment, "node_name", "enrollment.node_name"),
         token=_require(enrollment, "token", "enrollment.token"),
@@ -165,6 +169,8 @@ def _load_enrollment_config(path: Path) -> AgentEnrollmentConfig:
             identity.get("path", "/var/lib/vibeconnect/identity.json")
         ).expanduser(),
         agent_conf_path=path,
+        proxy_target_host=proxy_host,
+        proxy_target_port=proxy_port,
     )
 
 
@@ -186,6 +192,16 @@ def _require(section: SectionProxy, key: str, label: str) -> str:
     if not value:
         raise ConfigError(f"{label} is required")
     return value
+
+
+def _parse_host_port(value: str) -> tuple[str, int]:
+    host, separator, port_text = value.rpartition(":")
+    if not separator or not host or not port_text.isdigit():
+        raise ConfigError("proxy.target must be host:port")
+    port = int(port_text)
+    if not 1 <= port <= 65535:
+        raise ConfigError("proxy target_port is outside valid TCP port bounds")
+    return host, port
 
 
 def _load_identity(path: Path) -> dict[str, object]:
@@ -252,14 +268,17 @@ def _auth_frame(*, config: AgentConfig, identity: dict[str, object]) -> bytes:
 
 
 def _host_key_from_keyscan(result: str) -> str:
-    lines = [
-        line
+    keys = [
+        " ".join(line.split()[1:3])
         for line in result.splitlines()
         if line and not line.startswith("#") and "ssh-" in line
     ]
-    if not lines:
+    if not keys:
         raise AgentEnrollmentError("node sshd host public key is empty")
-    return " ".join(lines[0].split()[1:3])
+    for key in keys:
+        if key.startswith("ssh-ed25519 "):
+            return key
+    return keys[0]
 
 
 async def _run_ssh_keyscan(host: str, port: int) -> str:

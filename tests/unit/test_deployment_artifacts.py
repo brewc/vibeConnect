@@ -59,7 +59,7 @@ def test_filesystem_manifest_contains_required_paths_and_modes() -> None:
         "/etc/vibeconnectd/config.yaml root vibeconnectd 0640 file",
         "/etc/vibeconnectd/secrets root vibeconnectd 0750 dir",
         "/var/lib/vibeconnectd/replay vibeconnectd vibeconnectd 0700 dir",
-        "/etc/vibeconnect/agent.conf root vibe 0640 file",
+        "/etc/vibeconnect/agent.conf vibe vibe 0600 file",
         "/var/lib/vibeconnect/identity.json vibe vibe 0600 file",
     ):
         assert required in manifest

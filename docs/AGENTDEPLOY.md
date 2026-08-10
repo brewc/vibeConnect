@@ -18,13 +18,12 @@ The agent does not require inbound firewall access for vibeConnect.
 | Port | Direction | Destination | Purpose |
 | --- | --- | --- | --- |
 | TCP 4443 | outbound | Server | HTTPS enrollment API |
-| TCP 12345 | outbound | Server | Agent mTLS tunnel by spec |
-| TCP 4444 | outbound | Server | Tunnel port used by bundled alpha examples |
+| TCP 4444 | outbound | Server | Agent mTLS tunnel |
 | TCP 2222 | loopback only | local host | Local sshd target for the agent proxy |
 
-Prefer server tunnel port `12345` for new deployments. If the server is still
-using the bundled alpha example config, the agent `server_url` must point to
-`4444` until the server config is changed.
+The server enrollment API on TCP 4443 must be reachable during enrollment. The
+agent does not need inbound public access on TCP 2222; that listener should stay
+bound to `127.0.0.1` for the local proxy target.
 
 ## Install
 
@@ -51,7 +50,7 @@ sudo install -d -o vibe -g vibe -m 0700 /var/lib/vibeconnect
 Install the enrollment package and CA bundle:
 
 ```sh
-sudo install -o root -g vibe -m 0640 node-01.agent.conf /etc/vibeconnect/agent.conf
+sudo install -o vibe -g vibe -m 0600 node-01.agent.conf /etc/vibeconnect/agent.conf
 sudo install -o root -g vibe -m 0644 ca.crt /etc/vibeconnect/ca.crt
 ```
 
@@ -88,7 +87,13 @@ vibeConnect issues user certificates; it does not create node accounts.
 Run enrollment once:
 
 ```sh
+sudo chown root:vibe /etc/vibeconnect
+sudo chmod 0770 /etc/vibeconnect
 sudo -u vibe vibeconnect-agent enroll --config /etc/vibeconnect/agent.conf
+sudo chown root:vibe /etc/vibeconnect
+sudo chmod 0750 /etc/vibeconnect
+sudo chown vibe:vibe /etc/vibeconnect/agent.conf
+sudo chmod 0600 /etc/vibeconnect/agent.conf
 ```
 
 Enrollment validates the one-time token, records the node sshd host key, writes
@@ -126,18 +131,17 @@ Users connect to the server first, then the server routes the session to the
 registered agent named by the SSH remote command:
 
 ```sh
-ssh alice@vibeconnect.example.com node-01
+ssh -p 2222 alice@vibeconnect.example.com node-01
 ```
 
 The same connection can be launched through the server CLI helper:
 
 ```sh
-vibeconnect-server connect-agent --server vibeconnect.example.com --user alice --node-name node-01
+vibeconnect-server connect-agent --server vibeconnect.example.com --user alice --node-name node-01 --port 2222
 ```
 
 To see the exact command before connecting:
 
 ```sh
-vibeconnect-server connect-agent --server vibeconnect.example.com --user alice --node-name node-01 --dry-run
+vibeconnect-server connect-agent --server vibeconnect.example.com --user alice --node-name node-01 --port 2222 --dry-run
 ```
-

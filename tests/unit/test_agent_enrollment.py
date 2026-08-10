@@ -132,7 +132,7 @@ def test_rewrite_agent_conf_requires_a_token_line(tmp_path: Path) -> None:
         rewrite_agent_conf_without_token(path)
 
 
-def test_capture_node_ssh_host_public_key_requires_loopback_2222() -> None:
+def test_capture_node_ssh_host_public_key_requires_loopback_target() -> None:
     """Host key capture is constrained to the local sshd proxy target."""
     calls: list[tuple[str, int]] = []
 
@@ -142,10 +142,18 @@ def test_capture_node_ssh_host_public_key_requires_loopback_2222() -> None:
 
     assert capture_node_ssh_host_public_key(probe=probe) == _NODE_HOST_KEY
     assert calls == [("127.0.0.1", 2222)]
-    with pytest.raises(AgentEnrollmentError, match="127.0.0.1:2222"):
+    assert (
+        capture_node_ssh_host_public_key(
+            probe=probe,
+            host="127.0.0.2",
+            port=2200,
+        )
+        == _NODE_HOST_KEY
+    )
+    with pytest.raises(AgentEnrollmentError, match="IPv4 loopback"):
         capture_node_ssh_host_public_key(probe=probe, host="localhost")
-    with pytest.raises(AgentEnrollmentError, match="127.0.0.1:2222"):
-        capture_node_ssh_host_public_key(probe=probe, port=22)
+    with pytest.raises(AgentEnrollmentError, match="TCP bounds"):
+        capture_node_ssh_host_public_key(probe=probe, port=0)
 
 
 def stat_mode(path: Path) -> int:

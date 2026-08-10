@@ -37,12 +37,13 @@ def test_require_tunnel_tls_context_rejects_insecure_tls() -> None:
 
 
 def test_validate_proxy_target_allows_only_local_sshd() -> None:
-    """Agent raw TCP proxying is constrained to 127.0.0.1:2222."""
+    """Agent raw TCP proxying is constrained to configured IPv4 loopback."""
     assert validate_proxy_target("127.0.0.1", 2222).host == "127.0.0.1"
-    with pytest.raises(AgentTunnelError, match="127.0.0.1:2222"):
+    assert validate_proxy_target("127.0.0.2", 2200).port == 2200
+    with pytest.raises(AgentTunnelError, match="IPv4 loopback"):
         validate_proxy_target("localhost", 2222)
-    with pytest.raises(AgentTunnelError, match="127.0.0.1:2222"):
-        validate_proxy_target("127.0.0.1", 22)
+    with pytest.raises(AgentTunnelError, match="TCP bounds"):
+        validate_proxy_target("127.0.0.1", 0)
 
 
 def test_reconnect_delay_is_exponential_capped_and_jittered() -> None:
@@ -127,6 +128,55 @@ async def test_agent_tunnel_dispatches_session_data_to_local_sshd() -> None:
 
     assert opened_targets == [target]
     assert local_writer.data == b"\x00ssh-user-data\xff"
+    assert local_writer.closed
+
+
+async def test_agent_tunnel_accepts_auth_ok_before_session_open() -> None:
+    """The server auth acknowledgement keeps the tunnel open for later sessions."""
+    tunnel_reader = asyncio.StreamReader()
+    tunnel_writer = MemoryWriter()
+    local_reader = asyncio.StreamReader()
+    local_writer = MemoryWriter()
+    target = validate_proxy_target("127.0.0.1", 2222)
+    opened_targets = []
+
+    async def connect(
+        proxy_target: ProxyTarget,
+    ) -> tuple[AsyncReader, AsyncWriter]:
+        opened_targets.append(proxy_target)
+        return local_reader, local_writer
+
+    tunnel_reader.feed_data(
+        encode_frame(
+            frame_type=TunnelFrameType.AUTH_OK,
+            request_id="auth",
+            channel_id=None,
+        )
+    )
+    tunnel_reader.feed_data(
+        encode_frame(
+            frame_type=TunnelFrameType.OPEN_SESSION,
+            request_id="req-1",
+            channel_id="chan-1",
+        )
+    )
+    tunnel_reader.feed_data(
+        encode_frame(
+            frame_type=TunnelFrameType.CLOSE_SESSION,
+            request_id="req-2",
+            channel_id="chan-1",
+        )
+    )
+    tunnel_reader.feed_eof()
+
+    await handle_agent_tunnel_stream(
+        tunnel_reader=tunnel_reader,
+        tunnel_writer=tunnel_writer,
+        proxy_target=target,
+        connect_local=connect,
+    )
+
+    assert opened_targets == [target]
     assert local_writer.closed
 
 

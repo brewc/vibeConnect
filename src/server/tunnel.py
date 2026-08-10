@@ -10,7 +10,7 @@ import struct
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import Protocol
+from typing import Any, Protocol
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
@@ -168,6 +168,23 @@ class BrokerTunnelStream:
             self._closed = True
             await self._broker.close_session(channel_id=self._channel_id)
 
+    async def create_connection(
+        self,
+        protocol_factory: Any,
+        host: str,
+        port: int,
+    ) -> tuple[asyncio.Transport, Any]:
+        """Create an AsyncSSH-compatible transport over this brokered stream."""
+        protocol = protocol_factory()
+        transport = _BrokerTunnelTransport(
+            stream=self,
+            protocol=protocol,
+            peername=("127.0.0.1", port),
+        )
+        protocol.connection_made(transport)
+        transport.start()
+        return transport, protocol
+
     def feed_data(self, payload: bytes) -> None:
         """Buffer bytes received from the agent."""
         self._buffer.extend(payload)
@@ -177,6 +194,94 @@ class BrokerTunnelStream:
         """Mark the stream closed by the agent."""
         self._closed = True
         self._data_ready.set()
+
+
+class _BrokerTunnelTransport(asyncio.Transport):
+    """AsyncIO transport which carries AsyncSSH bytes over broker frames."""
+
+    def __init__(
+        self,
+        *,
+        stream: BrokerTunnelStream,
+        protocol: asyncio.Protocol,
+        peername: tuple[str, int],
+    ) -> None:
+        """Bind one protocol instance to one broker stream."""
+        super().__init__()
+        self._stream = stream
+        self._protocol = protocol
+        self._peername = peername
+        self._closing = False
+        self._read_task: asyncio.Task[None] | None = None
+
+    def start(self) -> None:
+        """Start forwarding brokered bytes into the protocol."""
+        self._read_task = asyncio.create_task(self._read_loop())
+
+    def write(self, data: bytes | bytearray | memoryview[Any]) -> None:
+        """Send protocol bytes into the brokered tunnel."""
+        if self._closing or not data:
+            return
+        asyncio.create_task(self._stream.write(bytes(data)))
+
+    def close(self) -> None:
+        """Close the brokered stream and notify the protocol."""
+        if self._closing:
+            return
+        self._closing = True
+        asyncio.create_task(self._stream.close())
+        if self._read_task is not None:
+            self._read_task.cancel()
+        self._protocol.connection_lost(None)
+
+    def abort(self) -> None:
+        """Abort the brokered stream."""
+        self.close()
+
+    def is_closing(self) -> bool:
+        """Return whether close has been requested."""
+        return self._closing
+
+    def can_write_eof(self) -> bool:
+        """Report that half-close is not supported by tunnel frames."""
+        return False
+
+    def get_extra_info(self, name: str, default: object = None) -> object:
+        """Return minimal peer metadata expected by AsyncSSH."""
+        if name == "peername":
+            return self._peername
+        if name == "sockname":
+            return ("127.0.0.1", 0)
+        return default
+
+    def set_write_buffer_limits(
+        self, high: int | None = None, low: int | None = None
+    ) -> None:
+        """Accept AsyncSSH buffer-limit configuration."""
+        return
+
+    def get_write_buffer_size(self) -> int:
+        """Return the queued write-buffer size."""
+        return 0
+
+    async def _read_loop(self) -> None:
+        try:
+            while not self._closing:
+                data = await self._stream.read(32768)
+                if not data:
+                    break
+                self._protocol.data_received(data)
+            if not self._closing:
+                self._closing = True
+                eof_handled = self._protocol.eof_received()
+                if not eof_handled:
+                    self._protocol.connection_lost(None)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if not self._closing:
+                self._closing = True
+                self._protocol.connection_lost(exc)
 
 
 class AgentTunnelStore(Protocol):
@@ -193,6 +298,9 @@ class AgentTunnelStore(Protocol):
         expires_at: dt.datetime,
     ) -> None:
         """Atomically persist a renewed agent cert binding."""
+
+    async def update_last_seen(self, agent_id: uuid.UUID, now: dt.datetime) -> None:
+        """Persist tunnel heartbeat freshness for jump authorization."""
 
 
 class AgentTunnelConnection(Protocol):
@@ -266,6 +374,19 @@ class PostgresAgentTunnelStore:
             _as_utc(expires_at),
         )
 
+    async def update_last_seen(self, agent_id: uuid.UUID, now: dt.datetime) -> None:
+        """Persist tunnel heartbeat freshness for jump authorization."""
+        await self._connection.execute(
+            """
+            UPDATE agents
+               SET last_seen = $2
+             WHERE id = $1
+               AND revoked = false
+            """,
+            agent_id,
+            _as_utc(now),
+        )
+
 
 class InMemoryAgentTunnelStore:
     """Lock-free in-memory store for unit tests and early wiring."""
@@ -273,6 +394,7 @@ class InMemoryAgentTunnelStore:
     def __init__(self, records: Mapping[uuid.UUID, AgentTunnelRecord]) -> None:
         """Initialize from known records."""
         self.records = dict(records)
+        self.last_seen: dict[uuid.UUID, dt.datetime] = {}
 
     async def get_agent(self, agent_id: uuid.UUID) -> AgentTunnelRecord | None:
         """Return the stored agent row."""
@@ -293,6 +415,10 @@ class InMemoryAgentTunnelStore:
             cert_serial=cert_serial,
             cert_expires_at=expires_at,
         )
+
+    async def update_last_seen(self, agent_id: uuid.UUID, now: dt.datetime) -> None:
+        """Persist tunnel heartbeat freshness for jump authorization."""
+        self.last_seen[agent_id] = _as_utc(now)
 
 
 class TunnelAuthenticator:
@@ -324,6 +450,10 @@ class TunnelAuthenticator:
         ):
             raise TunnelAuthError("tunnel secret mismatch")
         return record
+
+    async def update_last_seen(self, agent_id: uuid.UUID, now: dt.datetime) -> None:
+        """Persist tunnel heartbeat freshness for jump authorization."""
+        await self._store.update_last_seen(agent_id, now)
 
 
 class ActiveTunnelRegistry:
@@ -535,7 +665,9 @@ class ServerTunnelBroker:
                 ),
                 heartbeat=HeartbeatState(heartbeat_seconds=self._heartbeat_seconds),
             )
-            connection.heartbeat.mark_seen(_utc_now())
+            seen_at = _utc_now()
+            connection.heartbeat.mark_seen(seen_at)
+            await self._authenticator.update_last_seen(authenticated.agent_id, seen_at)
             self._registry.connect(
                 agent_id=authenticated.agent_id, connection_id=connection_id
             )
@@ -551,7 +683,11 @@ class ServerTunnelBroker:
                 decoded = await _read_one_frame(
                     reader, max_frame_bytes=self._max_frame_bytes
                 )
-                connection.heartbeat.mark_seen(_utc_now())
+                seen_at = _utc_now()
+                connection.heartbeat.mark_seen(seen_at)
+                await self._authenticator.update_last_seen(
+                    authenticated.agent_id, seen_at
+                )
                 self._handle_agent_frame(connection, decoded)
         except (EOFError, asyncio.IncompleteReadError):
             return

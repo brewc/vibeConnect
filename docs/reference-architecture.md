@@ -64,12 +64,9 @@ state is unknown, session establishment fails closed.
 | --- | --- | --- |
 | 22 | Server | User SSH entry point |
 | 4443 | Server | HTTPS enrollment/API |
-| 12345 | Server | Agent mTLS tunnel by spec |
+| 4444 | Server | Agent mTLS tunnel |
 | 2222 | Node loopback | Local node `sshd` target |
 | 9100 | Server loopback | Health, readiness, metrics |
-
-Deploy examples currently use `4444` for the tunnel URL while the spec names
-`12345`. Treat that as an alpha configuration mismatch to resolve before release.
 
 ## Key Material
 
@@ -122,4 +119,3 @@ replace local Unix accounts. Post-v1 account reconciliation should periodically
 compare LDAP or Azure AD membership to local accounts on managed nodes and the
 server. The default posture is inventory/report-only or disable-only, never
 delete-by-default, with protected account denylists and explicit ownership markers.
-

@@ -102,6 +102,12 @@ def test_schema_enforces_security_constraints() -> None:
     assert "CONSTRAINT agents_labels_array CHECK" in MIGRATION_SQL
 
 
+def test_schema_preserves_enrollment_token_labels_until_enrollment() -> None:
+    """Enrollment tokens carry package labels until the agent row is created."""
+    assert "labels jsonb NOT NULL DEFAULT '[]'::jsonb" in MIGRATION_SQL
+    assert "CONSTRAINT enrollment_tokens_labels_array" in MIGRATION_SQL
+
+
 def test_schema_rejects_duplicate_active_enrollment_tokens() -> None:
     """A partial unique index prevents duplicate active node enrollment tokens."""
     assert "CREATE UNIQUE INDEX enrollment_tokens_one_active_per_node" in MIGRATION_SQL

@@ -31,6 +31,8 @@ class AgentEnrollmentConfig:
     enrollment_tls_ca_bundle: Path
     identity_path: Path
     agent_conf_path: Path
+    proxy_target_host: str = "127.0.0.1"
+    proxy_target_port: int = 2222
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,10 +186,10 @@ def capture_node_ssh_host_public_key(
     port: int = 2222,
 ) -> str:
     """Capture the local sshd host public key from the configured proxy target."""
-    if host != "127.0.0.1" or port != 2222:
-        raise AgentEnrollmentError(
-            "node sshd host key must be read from 127.0.0.1:2222"
-        )
+    if not host.startswith("127."):
+        raise AgentEnrollmentError("node sshd host key must be read from IPv4 loopback")
+    if not 1 <= port <= 65535:
+        raise AgentEnrollmentError("node sshd host key port is outside TCP bounds")
     public_key = probe(host, port).strip()
     if not public_key:
         raise AgentEnrollmentError("node sshd host public key is empty")

@@ -134,9 +134,10 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
     if args.command == "migrate":
-        dsn = args.postgres_dsn or os.environ.get("VIBECONNECT_POSTGRES_DSN")
-        if not dsn:
-            parser.error("migrate requires --postgres-dsn or VIBECONNECT_POSTGRES_DSN")
+        try:
+            dsn = _admin_postgres_dsn(args)
+        except ConfigError as exc:
+            parser.error(str(exc))
         try:
             asyncio.run(_run_migrations(dsn=dsn, migrations_dir=args.migrations_dir))
         except (OSError, asyncpg.PostgresError) as exc:
@@ -156,11 +157,10 @@ def main(argv: list[str] | None = None) -> int:
         except OSError as exc:
             print(f"connect command failed: {exc}", file=sys.stderr)
             return 1
-    dsn = args.postgres_dsn or os.environ.get("VIBECONNECT_POSTGRES_DSN")
-    if not dsn:
-        parser.error(
-            f"{args.command} requires --postgres-dsn or VIBECONNECT_POSTGRES_DSN"
-        )
+    try:
+        dsn = _admin_postgres_dsn(args)
+    except ConfigError as exc:
+        parser.error(str(exc))
     try:
         output = asyncio.run(_run_admin_command(dsn=dsn, args=args))
     except (AdminError, OSError, asyncpg.PostgresError) as exc:
@@ -182,6 +182,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     migrate = subcommands.add_parser("migrate")
     migrate.add_argument("--postgres-dsn")
+    migrate.add_argument(
+        "--config",
+        type=Path,
+        default=Path("/etc/vibeconnectd/config.yaml"),
+    )
     migrate.add_argument(
         "--migrations-dir",
         type=Path,
@@ -205,6 +210,11 @@ def _build_parser() -> argparse.ArgumentParser:
     ):
         admin = subcommands.add_parser(command)
         admin.add_argument("--postgres-dsn")
+        admin.add_argument(
+            "--config",
+            type=Path,
+            default=Path("/etc/vibeconnectd/config.yaml"),
+        )
         admin.add_argument("--actor", default="local-admin")
         if command in {
             "create-agent",
@@ -216,6 +226,12 @@ def _build_parser() -> argparse.ArgumentParser:
             admin.add_argument("--node-name", required=True)
         if command == "create-agent":
             admin.add_argument("--label", action="append", default=[])
+            admin.add_argument("--server-host", default="server")
+            admin.add_argument("--enrollment-port", type=int, default=4443)
+            admin.add_argument("--tunnel-port", type=int, default=4444)
+            admin.add_argument("--proxy-host", default="127.0.0.1")
+            admin.add_argument("--proxy-port", type=int, default=2222)
+            admin.add_argument("--heartbeat-seconds", type=int, default=30)
         if command == "update-node-host-key":
             admin.add_argument("--host-key-file", type=Path, required=True)
         if command == "list-sessions":
@@ -268,6 +284,20 @@ def _run_connect_command(command: Sequence[str]) -> int:
 async def _run_migrations(*, dsn: str, migrations_dir: Path) -> None:
     connection = await connect(dsn)
     await run_migrations(connection, load_migrations(migrations_dir))
+
+
+def _admin_postgres_dsn(args: argparse.Namespace) -> str:
+    dsn = args.postgres_dsn or os.environ.get("VIBECONNECT_POSTGRES_DSN")
+    if dsn:
+        return dsn
+    config_path = cast(Path, args.config)
+    try:
+        settings = _load_runtime_settings(config_path)
+    except OSError as exc:
+        raise ConfigError(
+            f"server config is missing or unreadable: {config_path}"
+        ) from exc
+    return settings.postgres_dsn
 
 
 async def _run_server_start(*, config_path: Path) -> None:
@@ -355,7 +385,10 @@ async def _run_server_runtime(
             store=jump_store,
             replay_starter=replay_writer,
             certificate_issuer=user_certificate_issuer,
-            tunnel_opener=AsyncSshNodeTunnelOpener(connector_resolver=broker),
+            tunnel_opener=AsyncSshNodeTunnelOpener(
+                connector_resolver=broker,
+                node_port=config.tunnel.node_ssh_port,
+            ),
             audit_sink=audit_writer,
         )
         node_store = _PostgresNodeInventoryStore(cast(_NodeInventoryConnection, pool))
@@ -429,6 +462,12 @@ async def _run_admin_command(*, dsn: str, args: argparse.Namespace) -> str:
             node_name=args.node_name,
             labels=args.label,
             actor=args.actor,
+            server_host=args.server_host,
+            enrollment_port=args.enrollment_port,
+            tunnel_port=args.tunnel_port,
+            proxy_host=args.proxy_host,
+            proxy_port=args.proxy_port,
+            heartbeat_seconds=args.heartbeat_seconds,
         )
         return package.agent_conf
     if args.command == "list-agents":
@@ -716,7 +755,7 @@ def _load_runtime_settings(path: Path) -> ServerRuntimeSettings:
     return ServerRuntimeSettings(
         postgres_dsn=_postgres_dsn(postgres),
         ssh_listen=_host_port(str(server.get("listen_ssh", "0.0.0.0:22"))),
-        tunnel_listen=_host_port(str(server.get("listen_tunnel", "0.0.0.0:12345"))),
+        tunnel_listen=_host_port(str(server.get("listen_tunnel", "0.0.0.0:4444"))),
         api_listen=_host_port(str(server.get("listen_api", "0.0.0.0:4443"))),
         metrics_listen=_host_port(
             str(_runtime_mapping(raw, "metrics").get("listen", "127.0.0.1:9100"))
@@ -732,13 +771,21 @@ def _postgres_dsn(postgres: dict[str, object]) -> str:
     dsn = postgres.get("dsn")
     if isinstance(dsn, str) and dsn:
         return dsn
+    dsn_file = postgres.get("dsn_file")
+    if isinstance(dsn_file, str) and dsn_file:
+        value = Path(dsn_file).expanduser().read_text(encoding="utf-8").strip()
+        if value:
+            return value
+        raise ConfigError("postgres.dsn_file is empty")
     dsn_env = postgres.get("dsn_env")
     if isinstance(dsn_env, str) and dsn_env:
         env_value = os.environ.get(dsn_env)
         if env_value:
             return env_value
         raise ConfigError(f"{dsn_env} is not set")
-    raise ConfigError("postgres.dsn or postgres.dsn_env is required")
+    raise ConfigError(
+        "postgres.dsn, postgres.dsn_file, or postgres.dsn_env is required"
+    )
 
 
 def _runtime_mapping(raw: dict[str, object], key: str) -> dict[str, object]:

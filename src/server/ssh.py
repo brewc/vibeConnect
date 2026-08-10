@@ -207,7 +207,7 @@ class VibeConnectSshServer(asyncssh.SSHServer):
     ) -> bool:
         """Resolve the SSH public key into a canonical identity."""
         try:
-            public_key = key.export_public_key().decode("ascii")
+            public_key = key.export_public_key().decode("ascii").strip()
             self._identity = await self._identity_resolver.resolve_public_key(
                 username=username,
                 public_key=public_key,
@@ -317,6 +317,8 @@ class RestrictedShellSession(asyncssh.SSHServerSession[bytes]):
         self._term_type = "xterm"
         self._term_size = (80, 24, 0, 0)
         self._pump_tasks: set[asyncio.Task[None]] = set()
+        self._pending_input: list[bytes] = []
+        self._pending_eof = False
 
     def connection_made(self, chan: object) -> None:
         """Capture the AsyncSSH channel for terminal status replies."""
@@ -366,6 +368,7 @@ class RestrictedShellSession(asyncssh.SSHServerSession[bytes]):
                 session_state_store=self._session_state_store,
             )
             self._lifecycle = AsyncSshJumpSessionLifecycle(bridge=self._bridge)
+            await self._flush_pending_input()
             self._create_pump(self._pump_output(self._process.stdout))
             self._create_pump(self._pump_output(self._process.stderr))
             self._create_pump(self._wait_for_process())
@@ -375,21 +378,37 @@ class RestrictedShellSession(asyncssh.SSHServerSession[bytes]):
             await self._fail_started_jump("node process start failed")
             _exit(self._channel, 1)
 
-    def data_received(self, data: bytes, datatype: object) -> None:
+    def data_received(self, data: bytes | str, datatype: object) -> None:
         """Forward user PTY input to the node process and replay recorder."""
+        payload = data.encode("utf-8") if isinstance(data, str) else data
         if self._bridge is None:
+            self._pending_input.append(payload)
             return
         self._create_pump(
             self._bridge.send_user_input(
                 seconds=self._elapsed_seconds(),
-                payload=data,
+                payload=payload,
             )
         )
+
+    async def _flush_pending_input(self) -> None:
+        assert self._bridge is not None
+        for payload in self._pending_input:
+            await self._bridge.send_user_input(
+                seconds=self._elapsed_seconds(),
+                payload=payload,
+            )
+        self._pending_input.clear()
+        if self._pending_eof and self._process is not None:
+            self._process.stdin.write_eof()
+            self._pending_eof = False
 
     def eof_received(self) -> bool:
         """Forward user EOF to the node process."""
         process = self._process
-        if process is not None:
+        if process is None:
+            self._pending_eof = True
+        else:
             process.stdin.write_eof()
         return False
 
@@ -429,7 +448,7 @@ class RestrictedShellSession(asyncssh.SSHServerSession[bytes]):
                     payload=payload,
                 )
             if self._channel is not None:
-                self._channel.write(payload)
+                self._channel.write(payload.decode("utf-8", errors="replace"))
 
     async def _wait_for_process(self) -> None:
         assert self._process is not None
