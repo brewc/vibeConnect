@@ -293,7 +293,7 @@ async def _run_ssh_keyscan(host: str, port: int) -> str:
     stdout, _stderr = await process.communicate()
     if process.returncode != 0:
         raise AgentEnrollmentError("node sshd host key probe failed")
-    return stdout.decode("utf-8", errors="replace")
+    return stdout.decode("utf-8")
 
 
 if __name__ == "__main__":

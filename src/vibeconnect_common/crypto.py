@@ -26,6 +26,7 @@ from vibeconnect_common.identifiers import (
 )
 
 GENERATED_SECRET_BYTES = 32
+GENERATED_SECRET_MIN_CHARS = 43
 AGENT_CERT_DEFAULT_LIFETIME_DAYS = 90
 USER_CERT_DEFAULT_TTL_HOURS = 4
 USER_CERT_SOURCE_ADDRESS = "127.0.0.0/8"
@@ -55,9 +56,9 @@ class SecretValue:
     _value: str = field(repr=False)
 
     def __post_init__(self) -> None:
-        """Reject empty secret values."""
-        if not self._value:
-            raise SecretError("secret value cannot be empty")
+        """Reject values too short to be generated high-entropy secrets."""
+        if len(self._value) < GENERATED_SECRET_MIN_CHARS:
+            raise SecretError("secret value must be generated with at least 256 bits")
 
     def __repr__(self) -> str:
         """Return a redacted representation."""

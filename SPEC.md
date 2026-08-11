@@ -85,10 +85,12 @@ Default posture:
 `agents(id uuid PK, node_name text UNIQUE, hostname text, labels jsonb,
         x509_public_key text, node_ssh_host_public_key text,
         tunnel_secret_hash text, enrolled_at timestamptz, last_seen timestamptz,
-        revoked bool, cert_serial text, cert_expires_at timestamptz)`
+        revoked bool, revoked_at timestamptz, cert_serial text,
+        cert_expires_at timestamptz)`
 
 `enrollment_tokens(token_hash text PK, node_name text,
-                   created_by text, created_at timestamptz, expires_at timestamptz,
+                   labels jsonb, node_ssh_host_public_key text, created_by text,
+                   created_at timestamptz, expires_at timestamptz,
                    used bool, used_at timestamptz, disabled_at timestamptz,
                    agent_id uuid FK)`
 
@@ -116,13 +118,15 @@ or out-of-order migration state.
 Required constraints:
 - Security-critical columns are `NOT NULL` unless explicitly optional.
 - Nullable columns are limited to: `agents.hostname`, `agents.last_seen`,
+  `agents.revoked_at` until revoked,
   `enrollment_tokens.used_at`, `enrollment_tokens.disabled_at`,
   `enrollment_tokens.agent_id`, `sessions.ended_at` while open,
-  `sessions.replay_hmac` while open, and foreign-key context fields in `audit_events`
-  when not applicable.
+  `sessions.replay_hmac` while open or failed/terminated, and foreign-key context
+  fields in `audit_events` when not applicable.
 - `agents.revoked` defaults to `false`.
 - `sessions.status` is constrained to known values (`open`, `closed`, `failed`,
   `terminated`).
+- Closed sessions require `sessions.replay_hmac`.
 - `key_rotation_events.status` is constrained to known values (`started`, `completed`,
   `failed`, `rolled_back`).
 - User certificate serials are globally unique and DB-sequenced.
@@ -167,10 +171,11 @@ passwords, private keys, bearer tokens, replay payloads, and raw provider respon
 ## 4. Enrollment (one-time, server-side)
 
 ```
-vibeconnect-server create-agent --node-name NODE --label LABEL [--label LABEL ...]
+vibeconnect-server create-agent --node-name NODE --node-host-key-file PATH --label LABEL [--label LABEL ...]
 ```
 - Generates a join key with at least 256 bits of CSPRNG entropy, stores `sha256(key)`
-  in `enrollment_tokens` with `node_name`.
+  in `enrollment_tokens` with `node_name` and the operator-verified node sshd host
+  public key.
 - Emits an agent config package (`agent.conf` + enrollment TLS CA bundle) shipped to
   the node.
 
@@ -179,7 +184,9 @@ Agent one-time enroll:
 2. Generates an **Ed25519 X.509 client keypair locally** (private key never leaves node).
 3. TLS-connects to `server:4443/enroll`, sends token, X.509 public key, and the
    node sshd host public key observed from `127.0.0.1:2222`.
-4. Server validates token (hash-match, one-time, not-expired, node-name match).
+4. Server validates token (hash-match, one-time, not-expired, node-name match) and
+   rejects enrollment unless the agent-presented node sshd host key exactly matches
+   the operator-pinned baseline on the enrollment token.
 5. Server signs the agent's public key with `agent-ca` -> X.509 client certificate.
 6. Server persists agent row (`x509_public_key`, `node_ssh_host_public_key`,
    `sha256(tunnel_secret)`, `node_name`).
@@ -428,7 +435,8 @@ Server (the SSH-server endpoint) sees all PTY I/O. Writes asciinema `.cast` v2:
 ```
 - Storage: `$replay_dir/<session_id>.cast` on local disk.
 - Retention: `replay.retention_days` (default 30) via nightly pruning job.
-- `sessions` row closed with `ended_at`, `status=closed`, `replay_path`.
+- `sessions` row closed with `ended_at`, `status=closed`, `replay_path`,
+  `replay_hmac`.
 
 Replay hardening:
 - Replay storage is sensitive. Disk backend uses a server-owned directory with mode
@@ -484,7 +492,7 @@ Filesystem layout:
 - Agent identity: `/var/lib/vibeconnect/identity.json`
 
 Admin CLI:
-- `vibeconnect-server create-agent --node-name NODE --label LABEL [--label LABEL ...]`
+- `vibeconnect-server create-agent --node-name NODE --node-host-key-file PATH --label LABEL [--label LABEL ...]`
 - `vibeconnect-server list-agents`
 - `vibeconnect-server revoke-agent --node-name NODE`
 - `vibeconnect-server rotate-tunnel-secret --node-name NODE`

@@ -87,7 +87,7 @@ from vibeconnect_common.identifiers import (
     validate_node_name,
     validate_username_principal,
 )
-from vibeconnect_common.models import ServerConfig, SessionStatus
+from vibeconnect_common.models import ServerConfig
 from vibeconnect_common.replay import ReplayWriter
 
 DEFAULT_MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
@@ -120,6 +120,7 @@ class ServerRuntimeSettings:
     ssh_host_key_path: Path
     tls_cert_path: Path
     tls_key_path: Path
+    enrollment_tls_ca_bundle_path: Path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -283,6 +284,12 @@ def _build_parser() -> argparse.ArgumentParser:
             )
         if command == "create-agent":
             admin.add_argument(
+                "--node-host-key-file",
+                type=Path,
+                required=True,
+                help="operator-verified node sshd public host key",
+            )
+            admin.add_argument(
                 "--label",
                 action="append",
                 default=[],
@@ -354,7 +361,10 @@ def _build_connect_command(args: argparse.Namespace) -> tuple[str, ...]:
         "ClearAllForwardings=yes",
     ]
     if args.identity_file is not None:
-        command.extend(("-i", str(args.identity_file)))
+        identity_file = args.identity_file.expanduser()
+        if not identity_file.is_file():
+            raise ValueError("identity file must exist and be a regular file")
+        command.extend(("-i", str(identity_file)))
     command.extend((target, node_name))
     return tuple(command)
 
@@ -449,7 +459,9 @@ async def _run_server_runtime(
             tunnel_ca_bundle=config.tunnel.tls_ca_bundle.read_text(encoding="utf-8"),
             tunnel_host=settings.tunnel_public_host,
             tunnel_port=settings.tunnel_listen[1],
-            enrollment_tls_ca_bundle=settings.tls_cert_path.read_text(encoding="utf-8"),
+            enrollment_tls_ca_bundle=settings.enrollment_tls_ca_bundle_path.read_text(
+                encoding="utf-8"
+            ),
             audit_writer=AuditWriter(cast(AuditConnection, pool)),
         )
         enrollment_runner = await _start_aiohttp_site(
@@ -473,7 +485,6 @@ async def _run_server_runtime(
         replay_writer = ReplayWriter(
             directory=config.replay.directory,
             integrity_key=config.replay.integrity_key_path.read_bytes(),
-            session_store=_NoopReplaySessionStore(),
             audit_sink=None,
         )
         jump_coordinator = ServerJumpCoordinator(
@@ -557,6 +568,9 @@ async def _run_admin_command(*, dsn: str, args: argparse.Namespace) -> str:
             node_name=args.node_name,
             labels=args.label,
             actor=args.actor,
+            node_ssh_host_public_key=args.node_host_key_file.read_text(
+                encoding="utf-8"
+            ),
             server_host=args.server_host,
             enrollment_port=args.enrollment_port,
             tunnel_port=args.tunnel_port,
@@ -728,24 +742,6 @@ class _RuntimeUserCertificateIssuer:
         )
 
 
-class _NoopReplaySessionStore:
-    """Replay session store used when async DB close is handled elsewhere."""
-
-    def close_session(
-        self,
-        *,
-        session_id: uuid.UUID,
-        status: SessionStatus,
-        ended_at: dt.datetime,
-        replay_path: Path,
-        replay_hmac: str | None,
-    ) -> None:
-        """No-op close hook for synchronous replay recorder callbacks."""
-
-    def prune_replay_pointer(self, *, session_id: uuid.UUID) -> None:
-        """No-op prune hook for runtime replay writer."""
-
-
 def _build_identity_resolver(config: ServerConfig) -> SshIdentityResolver:
     public_keys = config.auth.public_keys
     if public_keys.source != "file" or public_keys.file_path is None:
@@ -859,6 +855,9 @@ def _load_runtime_settings(path: Path) -> ServerRuntimeSettings:
         ssh_host_key_path=_runtime_path(server, "ssh_host_key_path"),
         tls_cert_path=_runtime_path(server, "tls_cert_path"),
         tls_key_path=_runtime_path(server, "tls_key_path"),
+        enrollment_tls_ca_bundle_path=_runtime_path(
+            server, "enrollment_tls_ca_bundle_path"
+        ),
     )
 
 

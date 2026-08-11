@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 
 from vibeconnect_common.crypto import (
     IssuedUserCertificate,
+    SecretError,
     SecretValue,
     issue_agent_client_certificate,
     verify_secret_hash,
@@ -78,7 +79,7 @@ class AgentTunnelRecord:
     tunnel_secret_hash: str
     cert_serial: str
     cert_expires_at: dt.datetime
-    revoked_at: dt.datetime | None = None
+    revoked_at: dt.datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +214,8 @@ class _BrokerTunnelTransport(asyncio.Transport):
         self._peername = peername
         self._closing = False
         self._read_task: asyncio.Task[None] | None = None
+        self._write_tasks: set[asyncio.Task[None]] = set()
+        self._close_task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
         """Start forwarding brokered bytes into the protocol."""
@@ -222,17 +225,33 @@ class _BrokerTunnelTransport(asyncio.Transport):
         """Send protocol bytes into the brokered tunnel."""
         if self._closing or not data:
             return
-        asyncio.create_task(self._stream.write(bytes(data)))
+        task = asyncio.create_task(self._stream.write(bytes(data)))
+        self._write_tasks.add(task)
+        task.add_done_callback(self._write_done)
 
     def close(self) -> None:
         """Close the brokered stream and notify the protocol."""
         if self._closing:
             return
         self._closing = True
-        asyncio.create_task(self._stream.close())
+        self._close_task = asyncio.create_task(self._stream.close())
+        self._close_task.add_done_callback(self._close_done)
         if self._read_task is not None:
             self._read_task.cancel()
+        for task in tuple(self._write_tasks):
+            task.cancel()
         self._protocol.connection_lost(None)
+
+    def _write_done(self, task: asyncio.Task[None]) -> None:
+        self._write_tasks.discard(task)
+        if task.cancelled():
+            return
+        if task.exception() is not None:
+            self.close()
+
+    def _close_done(self, task: asyncio.Task[None]) -> None:
+        if not task.cancelled():
+            task.exception()
 
     def abort(self) -> None:
         """Abort the brokered stream."""
@@ -330,7 +349,8 @@ class PostgresAgentTunnelStore:
                    tunnel_secret_hash,
                    cert_serial,
                    cert_expires_at,
-                   revoked
+                   revoked,
+                   revoked_at
               FROM agents
              WHERE id = $1
             """,
@@ -338,7 +358,6 @@ class PostgresAgentTunnelStore:
         )
         if row is None:
             return None
-        revoked = bool(row["revoked"])
         return AgentTunnelRecord(
             agent_id=uuid.UUID(str(row["id"])),
             node_name=str(row["node_name"]),
@@ -346,9 +365,7 @@ class PostgresAgentTunnelStore:
             tunnel_secret_hash=str(row["tunnel_secret_hash"]),
             cert_serial=str(row["cert_serial"]),
             cert_expires_at=_as_utc(_datetime_value(row["cert_expires_at"])),
-            revoked_at=(
-                dt.datetime.fromtimestamp(0, tz=dt.timezone.utc) if revoked else None
-            ),
+            revoked_at=_optional_datetime_value(row["revoked_at"]),
         )
 
     async def update_agent_certificate(
@@ -445,9 +462,13 @@ class TunnelAuthenticator:
             raise TunnelAuthError("certificate serial mismatch")
         if record.x509_public_key != request.cert_public_key:
             raise TunnelAuthError("certificate public key mismatch")
-        if not verify_secret_hash(
-            SecretValue(request.tunnel_secret), record.tunnel_secret_hash
-        ):
+        try:
+            secret_matches = verify_secret_hash(
+                SecretValue(request.tunnel_secret), record.tunnel_secret_hash
+            )
+        except SecretError as exc:
+            raise TunnelAuthError("tunnel secret mismatch") from exc
+        if not secret_matches:
             raise TunnelAuthError("tunnel secret mismatch")
         return record
 
@@ -645,7 +666,10 @@ class ServerTunnelBroker:
         authenticated: AgentTunnelRecord | None = None
         connection_id = str(uuid.uuid4())
         try:
-            first = await _read_one_frame(reader, max_frame_bytes=self._max_frame_bytes)
+            first = await asyncio.wait_for(
+                _read_one_frame(reader, max_frame_bytes=self._max_frame_bytes),
+                timeout=TUNNEL_AUTH_TIMEOUT_SECONDS,
+            )
             if first.frame.type is not TunnelFrameType.AUTH:
                 raise TunnelAuthError("tunnel must start with auth")
             auth_request = _decode_auth_payload(first.payload)
@@ -689,7 +713,7 @@ class ServerTunnelBroker:
                     authenticated.agent_id, seen_at
                 )
                 self._handle_agent_frame(connection, decoded)
-        except (EOFError, asyncio.IncompleteReadError):
+        except (EOFError, asyncio.IncompleteReadError, TimeoutError):
             return
         except (TunnelAuthError, TunnelProtocolError, TunnelStateError):
             await _best_effort_error(writer)
@@ -1028,6 +1052,9 @@ def _peer_certificate_binding(writer: TunnelStreamWriter) -> PeerCertificateBind
         cert = x509.load_der_x509_certificate(cert_der)
     except ValueError as exc:
         raise TunnelAuthError("mTLS peer certificate is invalid") from exc
+    now = dt.datetime.now(dt.timezone.utc)
+    if cert.not_valid_before_utc > now or cert.not_valid_after_utc <= now:
+        raise TunnelAuthError("mTLS peer certificate is outside its validity window")
     public_key_pem = cert.public_key().public_bytes(
         serialization.Encoding.PEM,
         serialization.PublicFormat.SubjectPublicKeyInfo,
@@ -1055,6 +1082,12 @@ def _datetime_value(value: object) -> dt.datetime:
     if isinstance(value, dt.datetime):
         return value
     raise TunnelAuthError("stored agent timestamp is invalid")
+
+
+def _optional_datetime_value(value: object) -> dt.datetime | None:
+    if value is None:
+        return None
+    return _as_utc(_datetime_value(value))
 
 
 def _utc_now() -> dt.datetime:

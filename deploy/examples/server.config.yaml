@@ -6,6 +6,7 @@ server:
   ssh_host_key_path: /etc/vibeconnectd/secrets/ssh_host_ed25519_key
   tls_cert_path: /etc/vibeconnectd/secrets/server_tls.crt
   tls_key_path: /etc/vibeconnectd/secrets/server_tls.key
+  enrollment_tls_ca_bundle_path: /etc/vibeconnectd/secrets/enrollment_tls_ca.crt
 
 postgres:
   dsn_file: /etc/vibeconnectd/secrets/postgres.dsn

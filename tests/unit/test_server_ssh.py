@@ -25,7 +25,7 @@ from server.ssh import (
 from server.tunnel import HeartbeatState
 from vibeconnect_common.crypto import IssuedUserCertificate
 from vibeconnect_common.models import AuditEventType
-from vibeconnect_common.replay import ReplayRecorder
+from vibeconnect_common.replay import ReplayCloseResult, ReplayRecorder
 
 _NOW = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
 
@@ -246,9 +246,32 @@ async def test_restricted_shell_session_relays_user_and_node_pty_bytes() -> None
     await user_channel.wait_for_exit()
 
     assert node_connection.process.stdin.writes == [b"whoami\n"]
-    assert user_channel.writes == ["alice\n"]
+    assert user_channel.writes == [b"alice\n"]
     assert user_channel.exits == [0]
     assert user_channel.closed
+
+
+@pytest.mark.asyncio
+async def test_restricted_shell_session_fails_invalid_replay_bytes() -> None:
+    """Invalid PTY bytes fail the session instead of corrupting replay text."""
+    server = await _authenticated_server()
+    node_connection = FakeNodeConnection()
+    tunnel = FakeTunnelOpener(node_connection=node_connection)
+    session = RestrictedShellSession(
+        server=server,
+        handler_factory=lambda _: _handler(server=server, tunnel=tunnel),
+    )
+    user_channel = FakeUserChannel()
+    session.connection_made(user_channel)
+
+    assert session.exec_requested("node-01")
+    await node_connection.wait_for_process()
+    node_connection.process.stdout.feed(b"\xff")
+    await user_channel.wait_for_exit()
+
+    assert user_channel.exits == [1]
+    assert user_channel.closed
+    assert node_connection.closed
 
 
 @pytest.mark.asyncio
@@ -588,9 +611,14 @@ class FakeReplayRecorder:
     def record_output(self, seconds: float, data: str) -> None:
         """No-op output record."""
 
-    def close(self, *, now: dt.datetime | None = None) -> object:
+    def close(self, *, now: dt.datetime | None = None) -> ReplayCloseResult:
         """Return a fake close result."""
-        return object()
+        assert now is not None
+        return ReplayCloseResult(
+            path=Path("session.cast"),
+            hmac_hex="abc123hmac",
+            ended_at=now,
+        )
 
     def fail(self, *, error: str, now: dt.datetime | None = None) -> None:
         """No-op failure record."""

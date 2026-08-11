@@ -47,13 +47,14 @@ from vibeconnect_common.tunnel import (
 )
 
 _NOW = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+_RAW_SECRET = "s" * 43
 
 
 @pytest.mark.asyncio
 async def test_tunnel_auth_success_binds_agent_cert_and_secret() -> None:
     """Tunnel auth requires the stored cert binding and matching secret."""
     agent_id = uuid.uuid4()
-    secret = SecretValue("super-secret")
+    secret = SecretValue(_RAW_SECRET)
     record = _record(agent_id=agent_id, tunnel_secret_hash=sha256_hex(secret))
     store = InMemoryAgentTunnelStore({agent_id: record})
 
@@ -84,7 +85,7 @@ async def test_tunnel_auth_denials_fail_closed(
 ) -> None:
     """Cert mismatch, revocation, expiry, and wrong secret deny the tunnel."""
     agent_id = uuid.uuid4()
-    secret = SecretValue("super-secret")
+    secret = SecretValue(_RAW_SECRET)
     record = _record(agent_id=agent_id, tunnel_secret_hash=sha256_hex(secret))
     record = _replace_record(record, record_update)
     request = _auth_request(agent_id=agent_id, tunnel_secret=secret.reveal())
@@ -176,7 +177,7 @@ async def test_renew_agent_cert_success_and_revoked_denial() -> None:
     agent_id = uuid.uuid4()
     record = _record(
         agent_id=agent_id,
-        tunnel_secret_hash=sha256_hex(SecretValue("super-secret")),
+        tunnel_secret_hash=sha256_hex(SecretValue(_RAW_SECRET)),
     )
     store = InMemoryAgentTunnelStore({agent_id: record})
     ca_key, ca_cert = _agent_ca()
@@ -225,6 +226,7 @@ async def test_postgres_agent_tunnel_store_maps_schema_rows() -> None:
                 "cert_serial": "cert-01",
                 "cert_expires_at": _NOW + dt.timedelta(hours=1),
                 "revoked": False,
+                "revoked_at": None,
             }
         ]
     )
@@ -243,6 +245,7 @@ async def test_postgres_agent_tunnel_store_maps_schema_rows() -> None:
     assert record.agent_id == agent_id
     assert record.revoked_at is None
     assert "FROM agents" in connection.fetches[0][0]
+    assert "revoked_at" in connection.fetches[0][0]
     assert "revoked = false" in connection.executed[0][0]
     assert "last_seen = $2" in connection.executed[1][0]
     assert connection.executed[1][1] == (agent_id, _NOW)
@@ -252,7 +255,7 @@ async def test_postgres_agent_tunnel_store_maps_schema_rows() -> None:
 async def test_server_tunnel_broker_authenticates_stream_and_sends_auth_ok() -> None:
     """The server tunnel broker accepts only a valid initial auth frame."""
     agent_id = uuid.uuid4()
-    secret = SecretValue("super-secret")
+    secret = SecretValue(_RAW_SECRET)
     store = InMemoryAgentTunnelStore(
         {agent_id: _record(agent_id=agent_id, tunnel_secret_hash=sha256_hex(secret))}
     )
@@ -284,7 +287,7 @@ async def test_server_tunnel_broker_authenticates_stream_and_sends_auth_ok() -> 
 async def test_server_tunnel_broker_requires_auth_frame_to_match_mtls_peer() -> None:
     """Agent auth values must match the certificate proven by TLS."""
     agent_id = uuid.uuid4()
-    secret = SecretValue("super-secret")
+    secret = SecretValue(_RAW_SECRET)
     broker = _broker(agent_id=agent_id, secret=secret)
     reader = FakeTunnelReader(
         _auth_frame(agent_id=agent_id, tunnel_secret=secret.reveal())
@@ -308,7 +311,7 @@ async def test_server_tunnel_broker_requires_auth_frame_to_match_mtls_peer() -> 
 async def test_server_tunnel_broker_open_session_sends_agent_frame() -> None:
     """Opening a jump channel sends an OPEN_SESSION frame to the agent tunnel."""
     agent_id = uuid.uuid4()
-    secret = SecretValue("super-secret")
+    secret = SecretValue(_RAW_SECRET)
     broker = _broker(agent_id=agent_id, secret=secret)
     reader = BlockingTunnelReader()
     writer = FakeTunnelWriter()
@@ -356,7 +359,7 @@ async def test_server_tunnel_broker_open_session_sends_agent_frame() -> None:
 async def test_broker_tunnel_stream_is_asyncssh_tunnel_transport() -> None:
     """The broker stream exposes AsyncSSH's tunnel create_connection surface."""
     agent_id = uuid.uuid4()
-    secret = SecretValue("super-secret")
+    secret = SecretValue(_RAW_SECRET)
     broker = _broker(agent_id=agent_id, secret=secret)
     reader = BlockingTunnelReader()
     writer = FakeTunnelWriter()
@@ -418,7 +421,7 @@ async def test_broker_tunnel_stream_is_asyncssh_tunnel_transport() -> None:
 async def test_duplicate_tunnel_does_not_drop_existing_connection() -> None:
     """A rejected duplicate tunnel cannot evict the active tunnel."""
     agent_id = uuid.uuid4()
-    secret = SecretValue("super-secret")
+    secret = SecretValue(_RAW_SECRET)
     broker = _broker(agent_id=agent_id, secret=secret)
     first_reader = BlockingTunnelReader()
     first_writer = FakeTunnelWriter()

@@ -135,7 +135,16 @@ def test_server_start_reports_runtime_failure(
 @pytest.mark.parametrize(
     ("argv", "command"),
     [
-        (["create-agent", "--node-name", "node-01"], "create-agent"),
+        (
+            [
+                "create-agent",
+                "--node-name",
+                "node-01",
+                "--node-host-key-file",
+                "host.pub",
+            ],
+            "create-agent",
+        ),
         (["list-agents"], "list-agents"),
         (["revoke-agent", "--node-name", "node-01"], "revoke-agent"),
         (["rotate-tunnel-secret", "--node-name", "node-01"], "rotate-tunnel-secret"),
@@ -215,6 +224,8 @@ def test_create_agent_cli_accepts_server_host(
                 "create-agent",
                 "--node-name",
                 "node-01",
+                "--node-host-key-file",
+                "host.pub",
                 "--server-host",
                 "bastion.example.test",
                 "--enrollment-port",
@@ -269,9 +280,12 @@ def test_server_connect_agent_prints_dry_run_command(
 
 def test_server_connect_agent_runs_openssh_command(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """The connect helper executes OpenSSH with the selected agent node name."""
     calls: list[tuple[str, ...]] = []
+    identity_file = tmp_path / "user-cert-key"
+    identity_file.write_text("key", encoding="utf-8")
 
     def run_connect_command(command: Sequence[str]) -> int:
         calls.append(tuple(str(part) for part in command))
@@ -290,7 +304,7 @@ def test_server_connect_agent_runs_openssh_command(
                 "--port",
                 "2222",
                 "--identity-file",
-                "/tmp/user-cert-key",
+                str(identity_file),
             ]
         )
         == 23
@@ -305,7 +319,7 @@ def test_server_connect_agent_runs_openssh_command(
             "-o",
             "ClearAllForwardings=yes",
             "-i",
-            "/tmp/user-cert-key",
+            str(identity_file),
             "vibeconnect.example.test",
             "node-01",
         )
@@ -411,6 +425,7 @@ def _write_server_config(tmp_path: Path) -> Path:
                 "  ssh_host_key_path: /etc/vibeconnectd/ssh_host_ed25519_key",
                 "  tls_cert_path: /etc/vibeconnectd/server.crt",
                 "  tls_key_path: /etc/vibeconnectd/server.key",
+                "  enrollment_tls_ca_bundle_path: /etc/vibeconnectd/enrollment-ca.crt",
                 "postgres:",
                 f"  dsn_file: {dsn_path}",
                 "metrics:",

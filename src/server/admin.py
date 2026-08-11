@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from server.host_keys import validate_node_ssh_host_public_key
 from vibeconnect_common.audit import AuditWriter
 from vibeconnect_common.crypto import (
     SecretValue,
@@ -81,6 +82,7 @@ class AdminStore(Protocol):
         token_hash: str,
         node_name: str,
         labels: Sequence[str],
+        node_ssh_host_public_key: str,
         created_by: str,
         expires_at: dt.datetime,
         now: dt.datetime,
@@ -149,6 +151,7 @@ class PostgresAdminStore:
         node_name: str,
         labels: Sequence[str],
         created_by: str,
+        node_ssh_host_public_key: str,
         expires_at: dt.datetime,
         now: dt.datetime,
     ) -> None:
@@ -165,13 +168,15 @@ class PostgresAdminStore:
         await self._connection.execute(
             """
             INSERT INTO enrollment_tokens(
-                token_hash, node_name, labels, created_by, created_at, expires_at
+                token_hash, node_name, labels, node_ssh_host_public_key,
+                created_by, created_at, expires_at
             )
-            VALUES($1, $2, $3::jsonb, $4, $5, $6)
+            VALUES($1, $2, $3::jsonb, $4, $5, $6, $7)
             """,
             token_hash,
             node_name,
             json.dumps(list(labels)),
+            node_ssh_host_public_key,
             created_by,
             now,
             expires_at,
@@ -193,11 +198,13 @@ class PostgresAdminStore:
         row = await self._connection.fetchrow(
             """
             UPDATE agents
-            SET revoked = true
+            SET revoked = true,
+                revoked_at = $2
             WHERE node_name = $1 AND revoked = false
             RETURNING id
             """,
             node_name,
+            now,
         )
         if row is None:
             raise AdminError("agent not found or already revoked")
@@ -372,6 +379,7 @@ class AdminService:
         node_name: str,
         labels: Sequence[str],
         actor: str,
+        node_ssh_host_public_key: str,
         server_host: str = "server",
         enrollment_port: int = 4443,
         tunnel_port: int = 4444,
@@ -384,6 +392,7 @@ class AdminService:
         safe_node_name = validate_node_name(node_name)
         safe_labels = tuple(validate_label(label) for label in labels)
         safe_server_host = _validate_server_host(server_host)
+        safe_node_host_key = _validate_node_host_key(node_ssh_host_public_key)
         _validate_port(enrollment_port, "enrollment_port")
         _validate_port(tunnel_port, "tunnel_port")
         _validate_port(proxy_port, "proxy_port")
@@ -397,6 +406,7 @@ class AdminService:
             token_hash=token_hash,
             node_name=safe_node_name,
             labels=safe_labels,
+            node_ssh_host_public_key=safe_node_host_key,
             created_by=actor,
             expires_at=actual_now + dt.timedelta(days=ENROLLMENT_TOKEN_LIFETIME_DAYS),
             now=actual_now,
@@ -478,12 +488,11 @@ class AdminService:
     ) -> uuid.UUID:
         """Update a pinned node sshd host key and audit the change."""
         safe_node_name = validate_node_name(node_name)
-        if not node_ssh_host_public_key.strip():
-            raise AdminError("node sshd host key is required")
+        safe_node_host_key = _validate_node_host_key(node_ssh_host_public_key)
         actual_now = _utc_now() if now is None else _as_utc(now)
         agent_id = await self._store.update_node_host_key(
             node_name=safe_node_name,
-            node_ssh_host_public_key=node_ssh_host_public_key.strip(),
+            node_ssh_host_public_key=safe_node_host_key,
             now=actual_now,
         )
         await self._audit(
@@ -705,6 +714,13 @@ def _validate_proxy_host(value: str) -> str:
     if not value.startswith("127.") or any(char.isspace() for char in value):
         raise AdminError("invalid proxy host")
     return value
+
+
+def _validate_node_host_key(value: str) -> str:
+    try:
+        return validate_node_ssh_host_public_key(value)
+    except ValueError as exc:
+        raise AdminError(str(exc)) from exc
 
 
 def _validate_port(value: int, label: str) -> None:

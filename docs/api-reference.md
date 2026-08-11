@@ -128,7 +128,10 @@ vibeconnect-server migrate
 Create an enrollment package:
 
 ```sh
-vibeconnect-server create-agent --node-name node-01 --label env:dev
+vibeconnect-server create-agent \
+  --node-name node-01 \
+  --node-host-key-file /etc/ssh/ssh_host_ed25519_key.pub \
+  --label env:dev
 ```
 
 List agents:

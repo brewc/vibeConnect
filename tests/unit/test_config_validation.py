@@ -206,6 +206,34 @@ def test_load_agent_config_parses_agent_conf(tmp_path: Path) -> None:
     assert config.proxy_target_port == 2222
 
 
+def test_load_agent_config_requires_enrollment_ca_bundle(tmp_path: Path) -> None:
+    """Agent enrollment CA config cannot fall back to tunnel TLS config."""
+    config_path = tmp_path / "agent.conf"
+    tunnel_ca = _touch_public(tmp_path / "tunnel-ca.crt")
+    config_path.write_text(
+        "\n".join(
+            [
+                "[enrollment]",
+                "node_name = node-01",
+                "token = raw-token",
+                "api_url = https://server.example.test/enroll",
+                "",
+                "[tunnel]",
+                "server_url = tls://tunnel.example.test:4444",
+                f"tls_ca_bundle = {tunnel_ca}",
+                "",
+                "[proxy]",
+                "target = 127.0.0.1:2222",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="enrollment.tls_ca_bundle"):
+        load_agent_config(config_path)
+
+
 def _server_config(
     tmp_path: Path,
     *,

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Protocol
 
-from vibeconnect_common.models import AuditEventType, SessionStatus
+from vibeconnect_common.models import AuditEventType
 
 
 class ReplayError(RuntimeError):
@@ -22,18 +22,7 @@ class ReplayError(RuntimeError):
 
 
 class SessionStore(Protocol):
-    """Persistence surface used by replay close/failure paths."""
-
-    def close_session(
-        self,
-        *,
-        session_id: uuid.UUID,
-        status: SessionStatus,
-        ended_at: dt.datetime,
-        replay_path: Path,
-        replay_hmac: str | None,
-    ) -> None:
-        """Persist the final replay session state."""
+    """Persistence surface used by replay pruning."""
 
     def prune_replay_pointer(self, *, session_id: uuid.UUID) -> None:
         """Clear a pruned replay pointer from the session record."""
@@ -73,7 +62,6 @@ class ReplayRecorder:
         temp_path: Path,
         file: BinaryIO,
         integrity_key: bytes,
-        session_store: SessionStore,
         audit_sink: ReplayAuditSink | None,
         started_at: dt.datetime,
         width: int,
@@ -85,7 +73,6 @@ class ReplayRecorder:
         self._temp_path = temp_path
         self._file = file
         self._integrity_key = integrity_key
-        self._session_store = session_store
         self._audit_sink = audit_sink
         self._closed = False
         header = {
@@ -109,16 +96,8 @@ class ReplayRecorder:
         """Close a failed replay and persist failed session state."""
         if self._closed:
             return
-        ended_at = _utc_now() if now is None else _as_utc(now)
         self._closed = True
         self._close_file()
-        self._session_store.close_session(
-            session_id=self._session_id,
-            status=SessionStatus.FAILED,
-            ended_at=ended_at,
-            replay_path=self._path,
-            replay_hmac=None,
-        )
         if self._audit_sink is not None:
             self._audit_sink.write_replay_event(
                 event_type=AuditEventType.REPLAY_WRITE_FAILED,
@@ -144,13 +123,6 @@ class ReplayRecorder:
         hmac_hex = hmac.new(
             self._integrity_key, replay_bytes, hashlib.sha256
         ).hexdigest()
-        self._session_store.close_session(
-            session_id=self._session_id,
-            status=SessionStatus.CLOSED,
-            ended_at=ended_at,
-            replay_path=self._path,
-            replay_hmac=hmac_hex,
-        )
         return ReplayCloseResult(path=self._path, hmac_hex=hmac_hex, ended_at=ended_at)
 
     def _record(self, seconds: float, stream: str, data: str) -> None:
@@ -178,7 +150,6 @@ class ReplayWriter:
         *,
         directory: Path,
         integrity_key: bytes,
-        session_store: SessionStore,
         audit_sink: ReplayAuditSink | None = None,
     ) -> None:
         """Configure replay storage."""
@@ -186,7 +157,6 @@ class ReplayWriter:
             raise ReplayError("replay integrity key is required")
         self._directory = directory
         self._integrity_key = integrity_key
-        self._session_store = session_store
         self._audit_sink = audit_sink
 
     def start(
@@ -219,7 +189,6 @@ class ReplayWriter:
                 temp_path=Path(temp_name),
                 file=file,
                 integrity_key=self._integrity_key,
-                session_store=self._session_store,
                 audit_sink=self._audit_sink,
                 started_at=started_at,
                 width=width,

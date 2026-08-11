@@ -317,6 +317,7 @@ class RestrictedShellSession(asyncssh.SSHServerSession[bytes]):
         self._term_type = "xterm"
         self._term_size = (80, 24, 0, 0)
         self._pump_tasks: set[asyncio.Task[None]] = set()
+        self._task_failed = False
         self._pending_input: list[bytes] = []
         self._pending_eof = False
 
@@ -337,7 +338,7 @@ class RestrictedShellSession(asyncssh.SSHServerSession[bytes]):
 
     def exec_requested(self, command: str) -> bool:
         """Start the restricted jump for the exact requested node name."""
-        asyncio.create_task(self._start_exec(command))
+        self._create_pump(self._start_exec(command))
         return True
 
     async def _start_exec(self, command: str) -> None:
@@ -448,7 +449,7 @@ class RestrictedShellSession(asyncssh.SSHServerSession[bytes]):
                     payload=payload,
                 )
             if self._channel is not None:
-                self._channel.write(payload.decode("utf-8", errors="replace"))
+                self._channel.write(payload)
 
     async def _wait_for_process(self) -> None:
         assert self._process is not None
@@ -461,12 +462,21 @@ class RestrictedShellSession(asyncssh.SSHServerSession[bytes]):
         if self._started is None:
             return
         now = self._clock()
+        if self._bridge is not None:
+            await self._bridge.close(
+                status=SessionStatus.FAILED,
+                now=now,
+                error=error,
+            )
+            return
         self._started.replay.fail(error=error, now=now)
         if self._session_state_store is not None:
             await self._session_state_store.close_session(
                 session_id=self._started.session.session_id,
                 status=SessionStatus.FAILED,
                 ended_at=now,
+                replay_path=self._started.session.replay_path,
+                replay_hmac=None,
                 error=error,
             )
         if self._audit_sink is not None:
@@ -483,8 +493,32 @@ class RestrictedShellSession(asyncssh.SSHServerSession[bytes]):
     def _create_pump(self, awaitable: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         task: asyncio.Task[None] = asyncio.create_task(awaitable)
         self._pump_tasks.add(task)
-        task.add_done_callback(lambda done: self._pump_tasks.discard(done))
+        task.add_done_callback(self._pump_done)
         return task
+
+    def _pump_done(self, task: asyncio.Task[None]) -> None:
+        self._pump_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        if self._task_failed:
+            return
+        self._task_failed = True
+        for pending in tuple(self._pump_tasks):
+            pending.cancel()
+        failure_task = asyncio.create_task(
+            self._fail_started_jump("jump session task failed")
+        )
+        self._pump_tasks.add(failure_task)
+        failure_task.add_done_callback(self._failure_done)
+        _exit(self._channel, 1)
+
+    def _failure_done(self, task: asyncio.Task[None]) -> None:
+        self._pump_tasks.discard(task)
+        if not task.cancelled():
+            task.exception()
 
     def _elapsed_seconds(self) -> float:
         if self._started is None:

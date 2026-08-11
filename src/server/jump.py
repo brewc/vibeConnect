@@ -21,7 +21,7 @@ from server.auth import (
 from server.tunnel import HeartbeatState
 from vibeconnect_common.crypto import IssuedUserCertificate
 from vibeconnect_common.models import AuditEventType, SessionStatus
-from vibeconnect_common.replay import ReplayError, ReplayRecorder
+from vibeconnect_common.replay import ReplayCloseResult, ReplayError, ReplayRecorder
 
 
 class JumpError(PermissionError):
@@ -112,6 +112,8 @@ class JumpSessionStateStore(Protocol):
         session_id: uuid.UUID,
         status: SessionStatus,
         ended_at: dt.datetime,
+        replay_path: Path,
+        replay_hmac: str | None,
         error: str | None,
     ) -> None:
         """Persist one terminal jump session state."""
@@ -206,6 +208,8 @@ class PostgresJumpStore:
             session_id=session_id,
             status=SessionStatus.FAILED,
             ended_at=ended_at,
+            replay_path=Path(f"{session_id}.cast"),
+            replay_hmac=None,
             error=None,
         )
 
@@ -215,6 +219,8 @@ class PostgresJumpStore:
         session_id: uuid.UUID,
         status: SessionStatus,
         ended_at: dt.datetime,
+        replay_path: Path,
+        replay_hmac: str | None,
         error: str | None,
     ) -> None:
         """Persist one terminal jump session state."""
@@ -222,13 +228,17 @@ class PostgresJumpStore:
             """
             UPDATE sessions
                SET status = $2,
-                   ended_at = $3
+                   ended_at = $3,
+                   replay_path = $4,
+                   replay_hmac = $5
              WHERE id = $1
                AND status = 'open'
             """,
             session_id,
             status.value,
             _as_utc(ended_at),
+            str(replay_path),
+            replay_hmac,
         )
 
 
@@ -625,10 +635,15 @@ class JumpPtyBridge:
         if self._closed:
             return
         self._closed = True
+        replay_result: ReplayCloseResult | None = None
         if status is SessionStatus.CLOSED:
-            self._jump.replay.close(now=now)
+            replay_result = self._jump.replay.close(now=now)
             event_type = AuditEventType.SESSION_CLOSED
-            metadata: dict[str, object] = {"status": status.value}
+            metadata: dict[str, object] = {
+                "status": status.value,
+                "replay_path": str(replay_result.path),
+                "replay_hmac": replay_result.hmac_hex,
+            }
         elif status in {SessionStatus.FAILED, SessionStatus.TERMINATED}:
             self._jump.replay.fail(error=error or status.value, now=now)
             event_type = AuditEventType.SESSION_FAILED
@@ -640,6 +655,14 @@ class JumpPtyBridge:
                 session_id=self._jump.session.session_id,
                 status=status,
                 ended_at=now,
+                replay_path=(
+                    replay_result.path
+                    if replay_result is not None
+                    else self._jump.session.replay_path
+                ),
+                replay_hmac=(
+                    replay_result.hmac_hex if replay_result is not None else None
+                ),
                 error=error,
             )
         await self._tunnel_channel.close_session(channel_id=self._jump.channel_id)
@@ -765,7 +788,7 @@ class TunnelStreamAdapter:
 
 
 def _decode_pty(payload: bytes) -> str:
-    return payload.decode("utf-8", errors="replace")
+    return payload.decode("utf-8")
 
 
 def _as_utc(value: dt.datetime) -> dt.datetime:

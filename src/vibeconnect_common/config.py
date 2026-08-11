@@ -54,9 +54,8 @@ def load_agent_config(path: Path) -> AgentConfig:
         enrollment_token=enrollment_token,
         enrollment_completed=identity_path.exists(),
         enrollment_tls_ca_bundle=Path(
-            enrollment.get(
-                "tls_ca_bundle",
-                _require_config_value(tunnel, "tls_ca_bundle", "tunnel.tls_ca_bundle"),
+            _require_config_value(
+                enrollment, "tls_ca_bundle", "enrollment.tls_ca_bundle"
             )
         ).expanduser(),
         tunnel_tls_ca_bundle=Path(

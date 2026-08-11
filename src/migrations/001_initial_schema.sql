@@ -16,6 +16,7 @@ CREATE TABLE agents (
     enrolled_at timestamptz NOT NULL,
     last_seen timestamptz,
     revoked boolean NOT NULL DEFAULT false,
+    revoked_at timestamptz,
     cert_serial text NOT NULL UNIQUE,
     cert_expires_at timestamptz NOT NULL,
     CONSTRAINT agents_labels_array CHECK (jsonb_typeof(labels) = 'array')
@@ -25,6 +26,7 @@ CREATE TABLE enrollment_tokens (
     token_hash text PRIMARY KEY,
     node_name text NOT NULL,
     labels jsonb NOT NULL DEFAULT '[]'::jsonb,
+    node_ssh_host_public_key text NOT NULL,
     created_by text NOT NULL,
     created_at timestamptz NOT NULL,
     expires_at timestamptz NOT NULL,
@@ -48,6 +50,9 @@ CREATE TABLE sessions (
     CONSTRAINT sessions_user_cert_serial_unique UNIQUE (user_cert_serial),
     CONSTRAINT sessions_status_known CHECK (
         status IN ('open', 'closed', 'failed', 'terminated')
+    ),
+    CONSTRAINT sessions_closed_replay_hmac_required CHECK (
+        status <> 'closed' OR replay_hmac IS NOT NULL
     )
 );
 

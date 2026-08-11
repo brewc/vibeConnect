@@ -54,10 +54,16 @@ async def test_create_agent_disables_prior_unused_token() -> None:
     store = InMemoryEnrollmentStore()
     service = _service(store)
     first = await service.create_agent(
-        node_name="node-01", labels=["prod"], created_by="admin"
+        node_name="node-01",
+        labels=["prod"],
+        node_ssh_host_public_key=_NODE_HOST_KEY,
+        created_by="admin",
     )
     second = await service.create_agent(
-        node_name="node-01", labels=["prod"], created_by="admin"
+        node_name="node-01",
+        labels=["prod"],
+        node_ssh_host_public_key=_NODE_HOST_KEY,
+        created_by="admin",
     )
 
     assert first.token_hash != second.token_hash
@@ -72,12 +78,40 @@ async def test_create_agent_disables_prior_unused_token() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_agent_validates_and_normalizes_node_host_key() -> None:
+    """Enrollment token creation stores a valid canonical host-key baseline."""
+    store = InMemoryEnrollmentStore()
+    service = _service(store)
+    package = await service.create_agent(
+        node_name="node-01",
+        labels=[],
+        node_ssh_host_public_key=f"{_NODE_HOST_KEY} node-01",
+        created_by="admin",
+    )
+
+    assert (
+        store.tokens[package.token_hash]["node_ssh_host_public_key"] == _NODE_HOST_KEY
+    )
+
+    with pytest.raises(EnrollmentError, match="node sshd host key is invalid"):
+        await service.create_agent(
+            node_name="node-02",
+            labels=[],
+            node_ssh_host_public_key="ssh-ed25519 AAAAinvalid",
+            created_by="admin",
+        )
+
+
+@pytest.mark.asyncio
 async def test_enroll_success_persists_agent_and_response_shape() -> None:
     """Successful enrollment consumes the token and persists agent identity."""
     store = InMemoryEnrollmentStore()
     service = _service(store)
     package = await service.create_agent(
-        node_name="node-01", labels=("env:prod",), created_by="admin"
+        node_name="node-01",
+        labels=("env:prod",),
+        node_ssh_host_public_key=_NODE_HOST_KEY,
+        created_by="admin",
     )
 
     response = await service.enroll(
@@ -103,6 +137,24 @@ async def test_enroll_success_persists_agent_and_response_shape() -> None:
 
 
 @pytest.mark.asyncio
+async def test_enroll_accepts_canonical_key_for_commented_baseline() -> None:
+    """Key comments on the pinned baseline do not block valid enrollment."""
+    store = InMemoryEnrollmentStore()
+    service = _service(store)
+    package = await service.create_agent(
+        node_name="node-01",
+        labels=[],
+        node_ssh_host_public_key=f"{_NODE_HOST_KEY} node-01",
+        created_by="admin",
+    )
+
+    await service.enroll(_request(node_name="node-01", token=package.token.reveal()))
+
+    stored_agent = next(iter(store.agents.values()))
+    assert stored_agent.node_ssh_host_public_key == _NODE_HOST_KEY
+
+
+@pytest.mark.asyncio
 async def test_enroll_rejects_expired_duplicate_and_mismatched_tokens() -> None:
     """Token failures use one generic public error."""
     now = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
@@ -110,11 +162,16 @@ async def test_enroll_rejects_expired_duplicate_and_mismatched_tokens() -> None:
     expired = await service.create_agent(
         node_name="expired-01",
         labels=(),
+        node_ssh_host_public_key=_NODE_HOST_KEY,
         created_by="admin",
         now=now - dt.timedelta(days=ENROLLMENT_TOKEN_LIFETIME_DAYS + 1),
     )
     duplicate = await service.create_agent(
-        node_name="node-01", labels=(), created_by="admin", now=now
+        node_name="node-01",
+        labels=(),
+        node_ssh_host_public_key=_NODE_HOST_KEY,
+        created_by="admin",
+        now=now,
     )
 
     await service.enroll(
@@ -136,7 +193,10 @@ async def test_enroll_token_consumption_race_allows_one_winner() -> None:
     store = InMemoryEnrollmentStore()
     service = _service(store)
     package = await service.create_agent(
-        node_name="node-01", labels=(), created_by="admin"
+        node_name="node-01",
+        labels=(),
+        node_ssh_host_public_key=_NODE_HOST_KEY,
+        created_by="admin",
     )
     request = _request(node_name="node-01", token=package.token.reveal())
 
@@ -275,6 +335,7 @@ async def test_postgres_enrollment_store_uses_single_use_token_updates() -> None
                 "token_hash": "hash-01",
                 "node_name": "node-01",
                 "labels": '["prod"]',
+                "node_ssh_host_public_key": _NODE_HOST_KEY,
             }
         ]
     )
@@ -285,6 +346,7 @@ async def test_postgres_enrollment_store_uses_single_use_token_updates() -> None
         token_hash="hash-01",
         node_name="node-01",
         labels=("prod",),
+        node_ssh_host_public_key=_NODE_HOST_KEY,
         created_by="admin",
         expires_at=now + dt.timedelta(days=7),
     )
@@ -346,4 +408,6 @@ class FakeEnrollmentConnection:
         return self.rows.pop(0) if self.rows else None
 
 
-_NODE_HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINodeHostKey node-01"
+_NODE_HOST_KEY = (
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPySidB2javQaPqzV7guQZjoBKePBCZkp42J7qUX/Yzc"
+)

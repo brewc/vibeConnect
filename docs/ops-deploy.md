@@ -128,7 +128,10 @@ for per-user `authorized_keys`; they do not create or own local accounts in v1.
 Create an enrollment package:
 
 ```sh
-vibeconnect-server create-agent --node-name node-01 --label env:dev
+vibeconnect-server create-agent \
+  --node-name node-01 \
+  --node-host-key-file /etc/ssh/ssh_host_ed25519_key.pub \
+  --label env:dev
 ```
 
 List agents:

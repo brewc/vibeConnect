@@ -118,6 +118,7 @@ Create a one-time enrollment package on the server:
 ```sh
 vibeconnect-server create-agent \
   --node-name node-01 \
+  --node-host-key-file /etc/ssh/ssh_host_ed25519_key.pub \
   --label env:prod \
   --server-host vibeconnect.example.com \
   --enrollment-port 4443 \

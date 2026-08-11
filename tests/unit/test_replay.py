@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from vibeconnect_common.models import AuditEventType, SessionStatus
+from vibeconnect_common.models import AuditEventType
 from vibeconnect_common.replay import (
     ReplayError,
     ReplayWriter,
@@ -22,32 +22,11 @@ from vibeconnect_common.replay import (
 
 
 class FakeSessionStore:
-    """Capture replay session state updates."""
+    """Capture pruned replay pointers."""
 
     def __init__(self) -> None:
         """Initialize captured session updates."""
-        self.closes: list[dict[str, object]] = []
         self.pruned: list[uuid.UUID] = []
-
-    def close_session(
-        self,
-        *,
-        session_id: uuid.UUID,
-        status: SessionStatus,
-        ended_at: dt.datetime,
-        replay_path: Path,
-        replay_hmac: str | None,
-    ) -> None:
-        """Record close/failure session updates."""
-        self.closes.append(
-            {
-                "session_id": session_id,
-                "status": status,
-                "ended_at": ended_at,
-                "replay_path": replay_path,
-                "replay_hmac": replay_hmac,
-            }
-        )
 
     def prune_replay_pointer(self, *, session_id: uuid.UUID) -> None:
         """Record pruned replay pointers."""
@@ -82,13 +61,11 @@ def test_replay_writer_creates_asciinema_file_with_secure_permissions(
     tmp_path: Path,
 ) -> None:
     """Replay close publishes a 0600 asciinema file and stores its HMAC."""
-    store = FakeSessionStore()
     integrity_key = b"replay-integrity-key"
     session_id = uuid.uuid4()
     writer = ReplayWriter(
         directory=tmp_path,
         integrity_key=integrity_key,
-        session_store=store,
     )
 
     recorder = writer.start(
@@ -106,15 +83,7 @@ def test_replay_writer_creates_asciinema_file_with_secure_permissions(
     assert stat.S_IMODE(result.path.stat().st_mode) == 0o600
     assert result.path == tmp_path / f"{session_id}.cast"
     assert verify_replay_hmac(result.path, integrity_key, result.hmac_hex)
-    assert store.closes == [
-        {
-            "session_id": session_id,
-            "status": SessionStatus.CLOSED,
-            "ended_at": result.ended_at,
-            "replay_path": result.path,
-            "replay_hmac": result.hmac_hex,
-        }
-    ]
+    assert result.ended_at == dt.datetime(2026, 1, 1, 0, 1, tzinfo=dt.timezone.utc)
     lines = result.path.read_text().splitlines()
     assert lines[0] == (
         '{"version":2,"command":"node-01","width":228,"height":50,'
@@ -131,7 +100,6 @@ def test_replay_start_fails_before_session_when_file_cannot_be_created(
     writer = ReplayWriter(
         directory=tmp_path,
         integrity_key=b"key",
-        session_store=FakeSessionStore(),
     )
 
     def fail_mkstemp(*_args: object, **_kwargs: object) -> tuple[int, str]:
@@ -152,13 +120,11 @@ def test_replay_write_failure_marks_session_failed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A mid-session replay write failure marks the session failed."""
-    store = FakeSessionStore()
     audit_sink = FakeReplayAuditSink()
     session_id = uuid.uuid4()
     writer = ReplayWriter(
         directory=tmp_path,
         integrity_key=b"key",
-        session_store=store,
         audit_sink=audit_sink,
     )
     recorder = writer.start(
@@ -176,9 +142,6 @@ def test_replay_write_failure_marks_session_failed(
     with pytest.raises(ReplayError, match="write failed"):
         recorder.record_output(1.0, "lost")
 
-    assert store.closes[0]["status"] == SessionStatus.FAILED
-    assert store.closes[0]["session_id"] == session_id
-    assert store.closes[0]["replay_hmac"] is None
     assert audit_sink.events == [
         {
             "event_type": AuditEventType.REPLAY_WRITE_FAILED,

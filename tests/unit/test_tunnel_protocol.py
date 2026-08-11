@@ -17,6 +17,8 @@ from vibeconnect_common.tunnel import (
     encode_tunnel_secret_rotation,
 )
 
+_RAW_SECRET = "s" * 43
+
 
 def test_tunnel_frame_round_trips_opaque_payload() -> None:
     """Frame encoding preserves binary SSH payload bytes exactly."""
@@ -97,7 +99,7 @@ def test_tunnel_secret_rotation_round_trips_control_frame() -> None:
     encoded = encode_tunnel_secret_rotation(
         request_id="rotate-01",
         node_name="node-01",
-        tunnel_secret=SecretValue("new-secret"),
+        tunnel_secret=SecretValue(_RAW_SECRET),
     )
 
     decoded_frame = decode_frame(encoded)
@@ -107,7 +109,7 @@ def test_tunnel_secret_rotation_round_trips_control_frame() -> None:
     assert decoded_frame.frame.channel_id is None
     assert decoded_payload.request_id == "rotate-01"
     assert decoded_payload.node_name == "node-01"
-    assert decoded_payload.tunnel_secret.reveal() == "new-secret"
+    assert decoded_payload.tunnel_secret.reveal() == _RAW_SECRET
 
 
 def test_tunnel_secret_rotation_rejects_session_channel_frames() -> None:
@@ -116,7 +118,7 @@ def test_tunnel_secret_rotation_rejects_session_channel_frames() -> None:
         frame_type=TunnelFrameType.ROTATE_TUNNEL_SECRET,
         request_id="rotate-01",
         channel_id="chan-01",
-        payload=b'{"node_name":"node-01","tunnel_secret":"new-secret"}',
+        payload=b'{"node_name":"node-01","tunnel_secret":"sssssssssssssssssssssssssssssssssssssssssss"}',
     )
 
     with pytest.raises(TunnelProtocolError, match="control frame"):
@@ -128,7 +130,10 @@ def test_tunnel_secret_rotation_rejects_session_channel_frames() -> None:
     [
         (b"not-json", "payload is invalid"),
         (b"[]", "payload must be an object"),
-        (b'{"tunnel_secret":"new-secret"}', "node_name"),
+        (
+            b'{"tunnel_secret":"sssssssssssssssssssssssssssssssssssssssssss"}',
+            "node_name",
+        ),
         (b'{"node_name":"node-01","tunnel_secret":""}', "tunnel_secret"),
     ],
 )

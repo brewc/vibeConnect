@@ -59,6 +59,8 @@ def test_sha256_hex_only_accepts_generated_secret_values() -> None:
     token = generate_enrollment_token()
 
     assert verify_secret_hash(token, sha256_hex(token))
+    with pytest.raises(SecretError, match="at least 256 bits"):
+        SecretValue("password")
     with pytest.raises(SecretError, match="high-entropy secret"):
         sha256_hex("password")  # type: ignore[arg-type]
 

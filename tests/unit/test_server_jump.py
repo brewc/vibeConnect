@@ -27,7 +27,7 @@ from server.jump import (
 from server.tunnel import HeartbeatState
 from vibeconnect_common.crypto import IssuedUserCertificate
 from vibeconnect_common.models import AuditEventType, SessionStatus
-from vibeconnect_common.replay import ReplayError, ReplayRecorder
+from vibeconnect_common.replay import ReplayCloseResult, ReplayError, ReplayRecorder
 
 _NOW = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
 
@@ -357,12 +357,18 @@ async def test_pty_bridge_closes_replay_tunnel_and_audit() -> None:
             "session_id": started.session.session_id,
             "status": SessionStatus.CLOSED,
             "ended_at": _NOW,
+            "replay_path": Path("session.cast"),
+            "replay_hmac": "abc123hmac",
             "error": None,
         }
     ]
     assert tunnel.closed == [started.channel_id]
     assert audit.events[-1]["event_type"] is AuditEventType.SESSION_CLOSED
-    assert audit.events[-1]["metadata"] == {"status": "closed"}
+    assert audit.events[-1]["metadata"] == {
+        "status": "closed",
+        "replay_path": "session.cast",
+        "replay_hmac": "abc123hmac",
+    }
 
 
 @pytest.mark.asyncio
@@ -386,6 +392,8 @@ async def test_pty_bridge_failed_close_marks_replay_failed() -> None:
             "session_id": started.session.session_id,
             "status": SessionStatus.FAILED,
             "ended_at": _NOW,
+            "replay_path": Path("session.cast"),
+            "replay_hmac": None,
             "error": "node disconnected",
         }
     ]
@@ -541,6 +549,8 @@ async def test_postgres_jump_store_maps_target_and_session_state() -> None:
         session_id=session.session_id,
         status=SessionStatus.CLOSED,
         ended_at=_NOW + dt.timedelta(seconds=1),
+        replay_path=Path("session.cast"),
+        replay_hmac="abc123hmac",
         error=None,
     )
 
@@ -664,11 +674,15 @@ class FakeReplayRecorder:
         """Record node output."""
         self.outputs.append((seconds, data))
 
-    def close(self, *, now: dt.datetime | None = None) -> object:
+    def close(self, *, now: dt.datetime | None = None) -> ReplayCloseResult:
         """Record normal replay close."""
         assert now is not None
         self.closed.append(now)
-        return object()
+        return ReplayCloseResult(
+            path=Path("session.cast"),
+            hmac_hex="abc123hmac",
+            ended_at=now,
+        )
 
     def fail(self, *, error: str, now: dt.datetime | None = None) -> None:
         """Record replay failure."""
@@ -766,6 +780,8 @@ class FakeJumpSessionStateStore:
         session_id: uuid.UUID,
         status: SessionStatus,
         ended_at: dt.datetime,
+        replay_path: Path,
+        replay_hmac: str | None,
         error: str | None,
     ) -> None:
         """Record terminal session state."""
@@ -774,6 +790,8 @@ class FakeJumpSessionStateStore:
                 "session_id": session_id,
                 "status": status,
                 "ended_at": ended_at,
+                "replay_path": replay_path,
+                "replay_hmac": replay_hmac,
                 "error": error,
             }
         )

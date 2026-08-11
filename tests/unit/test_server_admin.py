@@ -7,6 +7,7 @@ import json
 import uuid
 from collections.abc import Mapping, Sequence
 
+import asyncssh
 import pytest
 
 from server.admin import (
@@ -30,6 +31,7 @@ async def test_create_agent_returns_one_time_config_and_audits_hash_only() -> No
     """Agent creation returns a token once and stores only its hash in audit."""
     store = FakeAdminStore()
     audit = FakeAuditConnection()
+    node_host_key = _node_host_key()
 
     package = await AdminService(
         store=store, audit_writer=AuditWriter(audit)
@@ -37,6 +39,7 @@ async def test_create_agent_returns_one_time_config_and_audits_hash_only() -> No
         node_name="node-01",
         labels=["prod"],
         actor="admin",
+        node_ssh_host_public_key=node_host_key,
         now=_NOW,
     )
 
@@ -52,9 +55,27 @@ async def test_create_agent_returns_one_time_config_and_audits_hash_only() -> No
     metadata = _last_audit_metadata(audit)
     stored_token_hash = store.created_tokens[0]["token_hash"]
     assert isinstance(stored_token_hash, str)
+    assert store.created_tokens[0]["node_ssh_host_public_key"] == node_host_key
     assert metadata["token_hash"] == "[REDACTED]"
     assert raw_token not in json.dumps(metadata)
     assert stored_token_hash not in json.dumps(metadata)
+
+
+@pytest.mark.asyncio
+async def test_create_agent_normalizes_commented_node_host_key() -> None:
+    """Pinned host keys are stored without OpenSSH public-key comments."""
+    store = FakeAdminStore()
+    node_host_key = _node_host_key()
+
+    await AdminService(store=store, audit_writer=None).create_agent(
+        node_name="node-01",
+        labels=["prod"],
+        actor="admin",
+        node_ssh_host_public_key=f"{node_host_key} node-01",
+        now=_NOW,
+    )
+
+    assert store.created_tokens[0]["node_ssh_host_public_key"] == node_host_key
 
 
 @pytest.mark.asyncio
@@ -66,6 +87,7 @@ async def test_create_agent_renders_selected_server_host() -> None:
         node_name="node-01",
         labels=["prod"],
         actor="admin",
+        node_ssh_host_public_key=_node_host_key(),
         server_host="bastion.example.test",
         enrollment_port=8443,
         tunnel_port=9444,
@@ -88,12 +110,18 @@ async def test_credential_changing_commands_emit_audit_events() -> None:
     audit = FakeAuditConnection()
     service = AdminService(store=store, audit_writer=AuditWriter(audit))
 
-    await service.create_agent(node_name="node-01", labels=[], actor="admin", now=_NOW)
+    await service.create_agent(
+        node_name="node-01",
+        labels=[],
+        actor="admin",
+        node_ssh_host_public_key=_node_host_key(),
+        now=_NOW,
+    )
     await service.revoke_agent(node_name="node-01", actor="admin", now=_NOW)
     await service.rotate_tunnel_secret(node_name="node-01", actor="admin", now=_NOW)
     await service.update_node_host_key(
         node_name="node-01",
-        node_ssh_host_public_key="ssh-ed25519 AAAAnewhost",
+        node_ssh_host_public_key=_node_host_key(),
         actor="admin",
         now=_NOW,
     )
@@ -205,6 +233,7 @@ class FakeAdminStore:
         token_hash: str,
         node_name: str,
         labels: Sequence[str],
+        node_ssh_host_public_key: str,
         created_by: str,
         expires_at: dt.datetime,
         now: dt.datetime,
@@ -215,6 +244,7 @@ class FakeAdminStore:
                 "token_hash": token_hash,
                 "node_name": node_name,
                 "labels": tuple(labels),
+                "node_ssh_host_public_key": node_ssh_host_public_key,
                 "created_by": created_by,
                 "expires_at": expires_at,
                 "now": now,
@@ -330,3 +360,12 @@ def _last_audit_metadata(connection: FakeAuditConnection) -> Mapping[str, object
     metadata = json.loads(str(args[7]))
     assert isinstance(metadata, dict)
     return metadata
+
+
+def _node_host_key() -> str:
+    return (
+        asyncssh.generate_private_key("ssh-ed25519")
+        .export_public_key()
+        .decode("ascii")
+        .strip()
+    )

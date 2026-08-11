@@ -19,8 +19,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
+from server.host_keys import validate_node_ssh_host_public_key
 from vibeconnect_common.audit import AuditWriter
 from vibeconnect_common.crypto import (
+    SecretError,
     SecretValue,
     generate_enrollment_token,
     generate_tunnel_secret,
@@ -58,6 +60,7 @@ class EnrollmentTokenRecord:
     token_hash: str
     node_name: str
     labels: tuple[str, ...]
+    node_ssh_host_public_key: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +120,7 @@ class EnrollmentStore(Protocol):
         token_hash: str,
         node_name: str,
         labels: Sequence[str],
+        node_ssh_host_public_key: str,
         created_by: str,
         expires_at: dt.datetime,
     ) -> None:
@@ -154,6 +158,7 @@ class PostgresEnrollmentStore:
         token_hash: str,
         node_name: str,
         labels: Sequence[str],
+        node_ssh_host_public_key: str,
         created_by: str,
         expires_at: dt.datetime,
     ) -> None:
@@ -173,12 +178,21 @@ class PostgresEnrollmentStore:
         await self._connection.execute(
             """
             INSERT INTO enrollment_tokens
-                (token_hash, node_name, labels, created_by, created_at, expires_at)
-            VALUES ($1, $2, $3::jsonb, $4, $5, $6)
+                (
+                    token_hash,
+                    node_name,
+                    labels,
+                    node_ssh_host_public_key,
+                    created_by,
+                    created_at,
+                    expires_at
+                )
+            VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7)
             """,
             token_hash,
             node_name,
             json.dumps(list(labels)),
+            node_ssh_host_public_key,
             created_by,
             now,
             _as_utc(expires_at),
@@ -197,7 +211,7 @@ class PostgresEnrollmentStore:
                AND used = false
                AND disabled_at IS NULL
                AND expires_at > $3
-            RETURNING token_hash, node_name, labels
+            RETURNING token_hash, node_name, labels, node_ssh_host_public_key
             """,
             token_hash,
             node_name,
@@ -209,6 +223,7 @@ class PostgresEnrollmentStore:
             token_hash=str(row["token_hash"]),
             node_name=str(row["node_name"]),
             labels=_labels(row["labels"]),
+            node_ssh_host_public_key=str(row["node_ssh_host_public_key"]),
         )
 
     async def persist_agent(self, agent: StoredAgent) -> None:
@@ -267,6 +282,7 @@ class InMemoryEnrollmentStore:
         token_hash: str,
         node_name: str,
         labels: Sequence[str],
+        node_ssh_host_public_key: str,
         created_by: str,
         expires_at: dt.datetime,
     ) -> None:
@@ -282,6 +298,7 @@ class InMemoryEnrollmentStore:
             self.tokens[token_hash] = {
                 "node_name": node_name,
                 "labels": tuple(labels),
+                "node_ssh_host_public_key": node_ssh_host_public_key,
                 "created_by": created_by,
                 "expires_at": expires_at,
                 "used": False,
@@ -312,6 +329,7 @@ class InMemoryEnrollmentStore:
                 token_hash=token_hash,
                 node_name=node_name,
                 labels=tuple(str(label) for label in labels),
+                node_ssh_host_public_key=str(row["node_ssh_host_public_key"]),
             )
 
     async def persist_agent(self, agent: StoredAgent) -> None:
@@ -393,6 +411,7 @@ class EnrollmentService:
         *,
         node_name: str,
         labels: Sequence[str],
+        node_ssh_host_public_key: str,
         created_by: str,
         now: dt.datetime | None = None,
     ) -> EnrollmentConfigPackage:
@@ -402,10 +421,17 @@ class EnrollmentService:
         token = generate_enrollment_token()
         token_hash = sha256_hex(token)
         actual_now = _utc_now() if now is None else _as_utc(now)
+        try:
+            safe_node_host_key = validate_node_ssh_host_public_key(
+                node_ssh_host_public_key
+            )
+        except ValueError as exc:
+            raise EnrollmentError(str(exc)) from exc
         await self._store.create_enrollment_token(
             token_hash=token_hash,
             node_name=safe_node_name,
             labels=safe_labels,
+            node_ssh_host_public_key=safe_node_host_key,
             created_by=created_by,
             expires_at=actual_now + dt.timedelta(days=ENROLLMENT_TOKEN_LIFETIME_DAYS),
         )
@@ -447,6 +473,14 @@ class EnrollmentService:
             )
             if record is None:
                 raise EnrollmentError("invalid_token")
+            try:
+                request_node_host_key = validate_node_ssh_host_public_key(
+                    request.node_ssh_host_public_key
+                )
+            except ValueError as exc:
+                raise EnrollmentError("node_host_key_mismatch") from exc
+            if request_node_host_key != record.node_ssh_host_public_key:
+                raise EnrollmentError("node_host_key_mismatch")
             agent_public_key = _load_agent_public_key(request.agent_x509_public_key)
             agent_id = uuid.uuid4()
             tunnel_secret = generate_tunnel_secret()
@@ -464,7 +498,7 @@ class EnrollmentService:
                     node_name=safe_node_name,
                     labels=record.labels,
                     x509_public_key=request.agent_x509_public_key,
-                    node_ssh_host_public_key=request.node_ssh_host_public_key,
+                    node_ssh_host_public_key=record.node_ssh_host_public_key,
                     tunnel_secret_hash=sha256_hex(tunnel_secret),
                     cert_serial=issued_cert.serial,
                     cert_expires_at=issued_cert.expires_at,
@@ -583,7 +617,10 @@ def _labels(value: object) -> tuple[str, ...]:
 def _best_effort_token_hash(token: str) -> str:
     if not token:
         return "empty"
-    return sha256_hex(SecretValue(token))
+    try:
+        return sha256_hex(SecretValue(token))
+    except SecretError:
+        return "invalid"
 
 
 def _utc_now() -> dt.datetime:
