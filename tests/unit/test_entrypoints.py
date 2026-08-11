@@ -8,6 +8,7 @@ import pytest
 from asyncpg import PostgresError  # type: ignore[import-untyped]
 
 from agent import main as agent_main_module
+from agent.enrollment import AgentEnrollmentError
 from server import main as server_main_module
 from vibeconnect_common import __version__
 
@@ -405,6 +406,65 @@ def test_agent_keyscan_prefers_ed25519_host_key() -> None:
         agent_main_module._host_key_from_keyscan(keyscan)
         == "ssh-ed25519 AAAAEd25519Key"
     )
+
+
+def test_agent_enrollment_config_requires_pinned_node_host_key(tmp_path: Path) -> None:
+    """Enrollment config carries the server-pinned node sshd host key."""
+    config_path = tmp_path / "agent.conf"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[enrollment]",
+                "node_name = node-01",
+                "token = raw-token",
+                "api_url = https://server.example.test/enroll",
+                "tls_ca_bundle = /etc/vibeconnect/ca.crt",
+                "node_ssh_host_public_key = ssh-ed25519 AAAAhost",
+                "",
+                "[proxy]",
+                "target = 127.0.0.1:2222",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = agent_main_module._load_enrollment_config(config_path)
+
+    assert config.expected_node_ssh_host_public_key == "ssh-ed25519 AAAAhost"
+
+
+@pytest.mark.asyncio
+async def test_agent_enroll_rejects_keyscan_mismatch_before_post(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent enrollment verifies keyscan output against the pinned host key."""
+    config_path = tmp_path / "agent.conf"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[enrollment]",
+                "node_name = node-01",
+                "token = raw-token",
+                "api_url = https://server.example.test/enroll",
+                "tls_ca_bundle = /etc/vibeconnect/ca.crt",
+                "node_ssh_host_public_key = ssh-ed25519 AAAApinned",
+                "",
+                "[proxy]",
+                "target = 127.0.0.1:2222",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    async def run_ssh_keyscan(_host: str, _port: int) -> str:
+        return "127.0.0.1 ssh-ed25519 AAAAobserved"
+
+    monkeypatch.setattr(agent_main_module, "_run_ssh_keyscan", run_ssh_keyscan)
+
+    with pytest.raises(AgentEnrollmentError, match="pinned"):
+        await agent_main_module._run_enroll(config_path)
 
 
 def _write_server_config(tmp_path: Path) -> Path:

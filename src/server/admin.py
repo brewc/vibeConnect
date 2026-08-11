@@ -430,6 +430,7 @@ class AdminService:
                 proxy_host=safe_proxy_host,
                 proxy_port=proxy_port,
                 heartbeat_seconds=heartbeat_seconds,
+                node_ssh_host_public_key=safe_node_host_key,
             ),
         )
 
@@ -672,6 +673,7 @@ def _render_agent_conf(
     node_name: str,
     token: SecretValue,
     *,
+    node_ssh_host_public_key: str,
     server_host: str = "server",
     enrollment_port: int = 4443,
     tunnel_port: int = 4444,
@@ -686,6 +688,7 @@ def _render_agent_conf(
             f"token = {token.reveal()}",
             f"api_url = https://{server_host}:{enrollment_port}/enroll",
             "tls_ca_bundle = /etc/vibeconnect/ca.crt",
+            f"node_ssh_host_public_key = {node_ssh_host_public_key}",
             "",
             "[tunnel]",
             f"server_url = https://{server_host}:{tunnel_port}/tunnel",

@@ -252,8 +252,8 @@ async def test_restricted_shell_session_relays_user_and_node_pty_bytes() -> None
 
 
 @pytest.mark.asyncio
-async def test_restricted_shell_session_fails_invalid_replay_bytes() -> None:
-    """Invalid PTY bytes fail the session instead of corrupting replay text."""
+async def test_restricted_shell_session_relays_non_utf8_pty_bytes() -> None:
+    """Non-UTF-8 PTY bytes are relayed without crashing replay capture."""
     server = await _authenticated_server()
     node_connection = FakeNodeConnection()
     tunnel = FakeTunnelOpener(node_connection=node_connection)
@@ -267,11 +267,13 @@ async def test_restricted_shell_session_fails_invalid_replay_bytes() -> None:
     assert session.exec_requested("node-01")
     await node_connection.wait_for_process()
     node_connection.process.stdout.feed(b"\xff")
+    await user_channel.wait_for_writes(1)
+    node_connection.process.finish()
     await user_channel.wait_for_exit()
 
-    assert user_channel.exits == [1]
+    assert user_channel.writes == [b"\xff"]
+    assert user_channel.exits == [0]
     assert user_channel.closed
-    assert node_connection.closed
 
 
 @pytest.mark.asyncio

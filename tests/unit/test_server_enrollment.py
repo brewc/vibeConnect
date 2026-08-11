@@ -74,6 +74,7 @@ async def test_create_agent_disables_prior_unused_token() -> None:
     assert "tls_ca_bundle = /etc/vibeconnect/ca.crt" in first.agent_conf
     assert "server_url = https://server:4444/tunnel" in first.agent_conf
     assert "target = 127.0.0.1:2222" in first.agent_conf
+    assert f"node_ssh_host_public_key = {_NODE_HOST_KEY}" in first.agent_conf
     assert "path = /var/lib/vibeconnect/identity.json" in first.agent_conf
 
 

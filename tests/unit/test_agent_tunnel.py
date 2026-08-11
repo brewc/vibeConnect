@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ssl
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +14,7 @@ from agent.tunnel import (
     AsyncWriter,
     MissedHeartbeatTracker,
     ProxyTarget,
+    TunnelReconnectLimitError,
     forward_ssh_payload,
     handle_agent_tunnel_stream,
     next_reconnect_delay,
@@ -57,7 +59,45 @@ def test_reconnect_delay_is_exponential_capped_and_jittered() -> None:
         next_reconnect_delay(attempt=0, jitter=2.0)
 
 
-def test_agent_missed_heartbeats_trigger_reconnect() -> None:
+@pytest.mark.asyncio
+async def test_run_tunnel_raises_after_max_reconnect_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agent exits with TunnelReconnectLimitError after exhausting retries."""
+    from agent.main import _run_tunnel
+    from vibeconnect_common.models import AgentConfig
+
+    attempts: list[None] = []
+
+    async def fake_run_once(config: object) -> None:
+        attempts.append(None)
+        raise AgentTunnelError("simulated failure")
+
+    async def fake_sleep(delay: float) -> None:
+        pass
+
+    monkeypatch.setattr("agent.main._run_tunnel_once", fake_run_once)
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    config = AgentConfig(
+        config_path=Path("/tmp/agent.conf"),
+        identity_path=Path("/tmp/id.json"),
+        enrollment_token=None,
+        enrollment_completed=True,
+        enrollment_tls_ca_bundle=Path("/tmp/ca.crt"),
+        tunnel_tls_ca_bundle=Path("/tmp/tca.crt"),
+        proxy_target_host="127.0.0.1",
+        proxy_target_port=2222,
+        heartbeat_seconds=30,
+        reconnect_backoff_max_seconds=300,
+        max_reconnect_attempts=3,
+    )
+    monkeypatch.setattr("agent.main.load_agent_config", lambda p: config)
+    monkeypatch.setattr("agent.main.validate_agent_config", lambda c: None)
+
+    with pytest.raises(TunnelReconnectLimitError, match="exhausted 3"):
+        await _run_tunnel(Path("/tmp/agent.conf"))
+    assert len(attempts) == 4
     """Agent reconnects after configured missed heartbeats."""
     tracker = MissedHeartbeatTracker(max_missed=2)
 

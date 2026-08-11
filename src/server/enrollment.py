@@ -447,7 +447,7 @@ class EnrollmentService:
             labels=safe_labels,
             token=token,
             token_hash=token_hash,
-            agent_conf=_render_agent_conf(safe_node_name, token),
+            agent_conf=_render_agent_conf(safe_node_name, token, safe_node_host_key),
             enrollment_tls_ca_bundle=self._enrollment_tls_ca_bundle,
         )
 
@@ -576,7 +576,9 @@ def make_enrollment_app(service: EnrollmentService) -> web.Application:
     return app
 
 
-def _render_agent_conf(node_name: str, token: SecretValue) -> str:
+def _render_agent_conf(
+    node_name: str, token: SecretValue, node_ssh_host_public_key: str
+) -> str:
     return "\n".join(
         [
             "[enrollment]",
@@ -584,6 +586,7 @@ def _render_agent_conf(node_name: str, token: SecretValue) -> str:
             f"token = {token.reveal()}",
             "api_url = https://server:4443/enroll",
             "tls_ca_bundle = /etc/vibeconnect/ca.crt",
+            f"node_ssh_host_public_key = {node_ssh_host_public_key}",
             "",
             "[tunnel]",
             "server_url = https://server:4444/tunnel",

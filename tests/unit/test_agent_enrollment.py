@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import ssl
+import uuid
 from pathlib import Path
 
 import pytest
@@ -140,25 +141,79 @@ def test_capture_node_ssh_host_public_key_requires_loopback_target() -> None:
         calls.append((host, port))
         return f"  {_NODE_HOST_KEY}  "
 
-    assert capture_node_ssh_host_public_key(probe=probe) == _NODE_HOST_KEY
+    assert (
+        capture_node_ssh_host_public_key(
+            probe=probe, expected_node_ssh_host_public_key=_NODE_HOST_KEY
+        )
+        == _NODE_HOST_KEY
+    )
     assert calls == [("127.0.0.1", 2222)]
     assert (
         capture_node_ssh_host_public_key(
             probe=probe,
+            expected_node_ssh_host_public_key=_NODE_HOST_KEY,
             host="127.0.0.2",
             port=2200,
         )
         == _NODE_HOST_KEY
     )
     with pytest.raises(AgentEnrollmentError, match="IPv4 loopback"):
-        capture_node_ssh_host_public_key(probe=probe, host="localhost")
+        capture_node_ssh_host_public_key(
+            probe=probe,
+            expected_node_ssh_host_public_key=_NODE_HOST_KEY,
+            host="localhost",
+        )
     with pytest.raises(AgentEnrollmentError, match="TCP bounds"):
-        capture_node_ssh_host_public_key(probe=probe, port=0)
+        capture_node_ssh_host_public_key(
+            probe=probe, expected_node_ssh_host_public_key=_NODE_HOST_KEY, port=0
+        )
+    with pytest.raises(AgentEnrollmentError, match="pinned"):
+        capture_node_ssh_host_public_key(
+            probe=probe,
+            expected_node_ssh_host_public_key="ssh-ed25519 AAAAother",
+        )
 
 
 def stat_mode(path: Path) -> int:
     """Return the POSIX permission bits for a path."""
     return os.stat(path).st_mode & 0o777
+
+
+def test_complete_enrollment_rejects_non_string_response_fields(tmp_path: Path) -> None:
+    """Malformed enrollment response fields are rejected before file creation."""
+    config = _config(tmp_path)
+    payload = build_enrollment_payload(
+        config=config, node_ssh_host_public_key=_NODE_HOST_KEY
+    )
+
+    for field, bad_value in (
+        ("agent_id", None),
+        ("agent_x509_cert", 123),
+        ("tunnel_ca_bundle", None),
+        ("tunnel_host", ""),
+        ("tunnel_secret", None),
+    ):
+        response = _response()
+        response[field] = bad_value
+        with pytest.raises(AgentEnrollmentError, match="enrollment response field"):
+            complete_enrollment(config=config, payload=payload, response=response)
+
+    assert not config.identity_path.exists()
+
+
+def test_complete_enrollment_rejects_non_dict_response(tmp_path: Path) -> None:
+    """A non-dict enrollment response is rejected."""
+    config = _config(tmp_path)
+    payload = build_enrollment_payload(
+        config=config, node_ssh_host_public_key=_NODE_HOST_KEY
+    )
+
+    with pytest.raises(AgentEnrollmentError, match="JSON object"):
+        complete_enrollment(
+            config=config,
+            payload=payload,
+            response=f"not a dict: {uuid.uuid4()}",  # type: ignore[arg-type]
+        )
 
 
 def _config(tmp_path: Path) -> AgentEnrollmentConfig:
@@ -167,6 +222,7 @@ def _config(tmp_path: Path) -> AgentEnrollmentConfig:
         token="raw-token",
         api_url="https://server.example.test/enroll",
         enrollment_tls_ca_bundle=tmp_path / "enrollment-ca.pem",
+        expected_node_ssh_host_public_key=_NODE_HOST_KEY,
         identity_path=tmp_path / "state" / "identity.json",
         agent_conf_path=tmp_path / "agent.conf",
     )

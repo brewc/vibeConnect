@@ -22,6 +22,7 @@ from server.jump import (
     ServerJumpCoordinator,
     StartedJump,
     TunnelStreamAdapter,
+    _decode_pty,
     validate_pinned_host_key,
 )
 from server.tunnel import HeartbeatState
@@ -56,6 +57,14 @@ def test_pinned_host_key_rejects_missing_and_mismatched_keys() -> None:
             expected_host_key="ssh-ed25519 AAAAhost",
             presented_host_key="ssh-ed25519 AAAAother",
         )
+
+
+def test_decode_pty_preserves_non_utf8_bytes_without_replacement() -> None:
+    """Replay text decoding preserves arbitrary PTY bytes for round-trip."""
+    decoded = _decode_pty(b"\x1b[31m\xff")
+
+    assert "\ufffd" not in decoded
+    assert decoded.encode("utf-8", errors="surrogateescape") == b"\x1b[31m\xff"
 
 
 @pytest.mark.asyncio

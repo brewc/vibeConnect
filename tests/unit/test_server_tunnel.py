@@ -30,6 +30,7 @@ from server.tunnel import (
     TunnelBackpressure,
     TunnelChannelRegistry,
     TunnelStateError,
+    _peer_certificate_binding,
     apply_channel_frame,
     build_tunnel_server_ssl_context,
 )
@@ -305,6 +306,42 @@ async def test_server_tunnel_broker_requires_auth_frame_to_match_mtls_peer() -> 
     assert response.frame.type is TunnelFrameType.ERROR
     with pytest.raises(TunnelStateError, match="not connected"):
         broker.connector_for_agent(agent_id=agent_id, channel_id="channel-01")
+
+
+@pytest.mark.asyncio
+async def test_server_tunnel_broker_closes_stream_on_auth_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tunnel that never sends AUTH is closed by the auth timeout."""
+    agent_id = uuid.uuid4()
+    secret = SecretValue(_RAW_SECRET)
+    broker = _broker(agent_id=agent_id, secret=secret)
+    reader = BlockingTunnelReader()
+    writer = FakeTunnelWriter()
+    monkeypatch.setattr("server.tunnel.TUNNEL_AUTH_TIMEOUT_SECONDS", 0.01)
+
+    await broker.handle_stream(
+        reader=reader,
+        writer=writer,
+        peer_certificate=_peer_binding(),
+        now=_NOW,
+    )
+
+    assert writer.closed
+    assert writer.data == b""
+
+
+def test_peer_certificate_binding_rejects_expired_cert() -> None:
+    """Expired mTLS peer certificates are rejected independently of ssl."""
+    writer = FakePeerCertificateWriter(
+        _agent_cert_der(
+            not_valid_before=dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc),
+            not_valid_after=dt.datetime(2025, 1, 2, tzinfo=dt.timezone.utc),
+        )
+    )
+
+    with pytest.raises(TunnelAuthError, match="validity window"):
+        _peer_certificate_binding(cast(Any, writer))
 
 
 @pytest.mark.asyncio
@@ -634,6 +671,32 @@ class FakeTunnelWriter:
             self._event.clear()
 
 
+class FakePeerCertificateWriter:
+    """Writer fake exposing an mTLS peer certificate."""
+
+    def __init__(self, cert_der: bytes) -> None:
+        """Initialize the fake TLS peer certificate."""
+        self._ssl_object = FakeSslObject(cert_der)
+
+    def get_extra_info(self, name: str) -> object | None:
+        """Return the fake ssl object for peer certificate binding."""
+        if name == "ssl_object":
+            return self._ssl_object
+        return None
+
+
+class FakeSslObject:
+    """SSL object fake exposing a DER peer certificate."""
+
+    def __init__(self, cert_der: bytes) -> None:
+        """Initialize the fake DER certificate."""
+        self._cert_der = cert_der
+
+    def getpeercert(self, binary_form: bool = False) -> bytes | None:
+        """Return the DER peer cert only for binary form requests."""
+        return self._cert_der if binary_form else None
+
+
 class FakeTunnelProtocol(asyncio.Protocol):
     """Capture transport lifecycle and bytes from a broker transport."""
 
@@ -749,6 +812,24 @@ def _public_key_pem() -> str:
         )
         .decode("ascii")
     )
+
+
+def _agent_cert_der(
+    *, not_valid_before: dt.datetime, not_valid_after: dt.datetime
+) -> bytes:
+    key = Ed25519PrivateKey.generate()
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "node-01")])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(not_valid_before)
+        .not_valid_after(not_valid_after)
+        .sign(private_key=key, algorithm=None)
+    )
+    return cert.public_bytes(serialization.Encoding.DER)
 
 
 def _agent_ca() -> tuple[Ed25519PrivateKey, x509.Certificate]:

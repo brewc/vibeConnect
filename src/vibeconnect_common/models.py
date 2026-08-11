@@ -177,3 +177,4 @@ class AgentConfig:
     proxy_target_port: int
     heartbeat_seconds: int
     reconnect_backoff_max_seconds: int
+    max_reconnect_attempts: int

@@ -575,7 +575,7 @@ Config validation fails startup when:
 
 Minimum agent config schema:
 - `enrollment.node_name`, `enrollment.token`, `enrollment.api_url`,
-  `enrollment.tls_ca_bundle`.
+  `enrollment.tls_ca_bundle`, and `enrollment.node_ssh_host_public_key`.
 - `identity.path`.
 - `tunnel.host`, `tunnel.port`, `tunnel.tls_ca_bundle`, `tunnel.heartbeat_seconds`,
   and `tunnel.reconnect_backoff_max_seconds`.

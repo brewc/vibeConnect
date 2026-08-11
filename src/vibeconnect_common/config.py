@@ -67,6 +67,7 @@ def load_agent_config(path: Path) -> AgentConfig:
         reconnect_backoff_max_seconds=int(
             tunnel.get("reconnect_backoff_max_seconds", "300")
         ),
+        max_reconnect_attempts=int(tunnel.get("max_reconnect_attempts", "0")),
     )
 
 
@@ -217,6 +218,8 @@ def validate_agent_config(
         raise ConfigError("heartbeat_seconds is outside documented bounds")
     if not 30 <= config.reconnect_backoff_max_seconds <= 1800:
         raise ConfigError("reconnect_backoff_max_seconds is outside documented bounds")
+    if config.max_reconnect_attempts < 0:
+        raise ConfigError("max_reconnect_attempts cannot be negative")
     if config.enrollment_completed and config.enrollment_token:
         raise ConfigError("enrollment token remains after successful enrollment")
 

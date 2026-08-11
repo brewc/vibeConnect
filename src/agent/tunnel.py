@@ -25,6 +25,10 @@ class AgentTunnelError(RuntimeError):
     """Raised when the agent tunnel cannot proceed safely."""
 
 
+class TunnelReconnectLimitError(AgentTunnelError):
+    """Raised when the agent exhausts its configured reconnect attempts."""
+
+
 @dataclass(frozen=True, slots=True)
 class ProxyTarget:
     """Validated local sshd proxy target."""

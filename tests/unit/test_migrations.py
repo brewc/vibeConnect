@@ -100,6 +100,8 @@ def test_schema_enforces_security_constraints() -> None:
         "status IN ('started', 'completed', 'failed', 'rolled_back')" in MIGRATION_SQL
     )
     assert "CONSTRAINT agents_labels_array CHECK" in MIGRATION_SQL
+    assert "sessions_closed_replay_hmac_required" in MIGRATION_SQL
+    assert "status <> 'closed' OR replay_hmac IS NOT NULL" in MIGRATION_SQL
 
 
 def test_schema_preserves_enrollment_token_labels_until_enrollment() -> None:

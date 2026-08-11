@@ -48,6 +48,7 @@ async def test_create_agent_returns_one_time_config_and_audits_hash_only() -> No
     assert "tls_ca_bundle = /etc/vibeconnect/ca.crt" in package.agent_conf
     assert "server_url = https://server:4444/tunnel" in package.agent_conf
     assert "target = 127.0.0.1:2222" in package.agent_conf
+    assert f"node_ssh_host_public_key = {node_host_key}" in package.agent_conf
     assert "path = /var/lib/vibeconnect/identity.json" in package.agent_conf
     raw_token = package.agent_conf.split("token = ", 1)[1].splitlines()[0]
     assert raw_token

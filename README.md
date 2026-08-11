@@ -54,7 +54,7 @@ For alpha-only local development, migrations seed an `admin` user with password
 Use the local server admin CLI for node enrollment management:
 
 ```sh
-PYTHONPATH=src .venv/bin/python -m server.main create-agent --node-name node-01 --label env:dev
+PYTHONPATH=src .venv/bin/python -m server.main create-agent --node-name node-01 --node-host-key-file /etc/ssh/ssh_host_ed25519_key.pub --label env:dev
 PYTHONPATH=src .venv/bin/python -m server.main list-agents
 PYTHONPATH=src .venv/bin/python -m server.main list-sessions
 ```
@@ -81,4 +81,3 @@ bash scripts/build_pyinstaller.sh
 - [Reference Architecture](docs/reference-architecture.md)
 - [Operations and Deploy](docs/ops-deploy.md)
 - [Integration Test Notes](tests/integration/README.md)
-

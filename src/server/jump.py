@@ -788,7 +788,7 @@ class TunnelStreamAdapter:
 
 
 def _decode_pty(payload: bytes) -> str:
-    return payload.decode("utf-8")
+    return payload.decode("utf-8", errors="surrogateescape")
 
 
 def _as_utc(value: dt.datetime) -> dt.datetime:

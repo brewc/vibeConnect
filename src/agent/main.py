@@ -24,6 +24,7 @@ from agent.enrollment import (
 )
 from agent.tunnel import (
     AgentTunnelError,
+    TunnelReconnectLimitError,
     handle_agent_tunnel_stream,
     next_reconnect_delay,
     require_tunnel_tls_context,
@@ -86,6 +87,8 @@ async def _run_enroll(config_path: Path) -> None:
     host_key = _host_key_from_keyscan(
         await _run_ssh_keyscan(config.proxy_target_host, config.proxy_target_port)
     )
+    if host_key != config.expected_node_ssh_host_public_key:
+        raise AgentEnrollmentError("node sshd host key does not match pinned key")
     payload = build_enrollment_payload(
         config=config,
         node_ssh_host_public_key=host_key,
@@ -114,11 +117,16 @@ async def _run_tunnel(config_path: Path) -> None:
     config = load_agent_config(config_path)
     validate_agent_config(config)
     attempt = 0
+    max_attempts = config.max_reconnect_attempts
     while True:
         try:
             await _run_tunnel_once(config)
             attempt = 0
         except (AgentTunnelError, OSError, asyncio.IncompleteReadError):
+            if max_attempts > 0 and attempt >= max_attempts:
+                raise TunnelReconnectLimitError(
+                    f"exhausted {max_attempts} reconnect attempts"
+                ) from None
             delay = next_reconnect_delay(
                 attempt=attempt,
                 max_seconds=float(config.reconnect_backoff_max_seconds),
@@ -165,6 +173,11 @@ def _load_enrollment_config(path: Path) -> AgentEnrollmentConfig:
         enrollment_tls_ca_bundle=Path(
             _require(enrollment, "tls_ca_bundle", "enrollment.tls_ca_bundle")
         ).expanduser(),
+        expected_node_ssh_host_public_key=_require(
+            enrollment,
+            "node_ssh_host_public_key",
+            "enrollment.node_ssh_host_public_key",
+        ),
         identity_path=Path(
             identity.get("path", "/var/lib/vibeconnect/identity.json")
         ).expanduser(),

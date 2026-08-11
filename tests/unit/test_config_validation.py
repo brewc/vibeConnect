@@ -206,6 +206,90 @@ def test_load_agent_config_parses_agent_conf(tmp_path: Path) -> None:
     assert config.proxy_target_port == 2222
 
 
+def test_load_agent_config_parses_max_reconnect_attempts(tmp_path: Path) -> None:
+    """Agent config files parse max_reconnect_attempts with a default of 0."""
+    config_path = tmp_path / "agent.conf"
+    enrollment_ca = _touch_public(tmp_path / "enrollment-ca.crt")
+    tunnel_ca = _touch_public(tmp_path / "tunnel-ca.crt")
+    config_path.write_text(
+        "\n".join(
+            [
+                "[enrollment]",
+                "node_name = node-01",
+                "token = raw-token",
+                "api_url = https://server.example.test/enroll",
+                f"tls_ca_bundle = {enrollment_ca}",
+                "",
+                "[identity]",
+                f"path = {tmp_path / 'identity' / 'identity.json'}",
+                "",
+                "[tunnel]",
+                "tls_ca_bundle = " + str(tunnel_ca),
+                "heartbeat_seconds = 30",
+                "reconnect_backoff_max_seconds = 300",
+                "max_reconnect_attempts = 10",
+                "",
+                "[proxy]",
+                "target = 127.0.0.1:2222",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = load_agent_config(config_path)
+
+    assert config.max_reconnect_attempts == 10
+
+
+def test_load_agent_config_defaults_max_reconnect_attempts_to_zero(
+    tmp_path: Path,
+) -> None:
+    """max_reconnect_attempts defaults to 0 (unlimited) when not set."""
+    config_path = tmp_path / "agent.conf"
+    enrollment_ca = _touch_public(tmp_path / "enrollment-ca.crt")
+    tunnel_ca = _touch_public(tmp_path / "tunnel-ca.crt")
+    config_path.write_text(
+        "\n".join(
+            [
+                "[enrollment]",
+                "node_name = node-01",
+                "token = raw-token",
+                "api_url = https://server.example.test/enroll",
+                f"tls_ca_bundle = {enrollment_ca}",
+                "",
+                "[identity]",
+                f"path = {tmp_path / 'identity' / 'identity.json'}",
+                "",
+                "[tunnel]",
+                "tls_ca_bundle = " + str(tunnel_ca),
+                "heartbeat_seconds = 30",
+                "reconnect_backoff_max_seconds = 300",
+                "",
+                "[proxy]",
+                "target = 127.0.0.1:2222",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = load_agent_config(config_path)
+
+    assert config.max_reconnect_attempts == 0
+
+
+def test_validate_agent_config_rejects_negative_max_reconnect_attempts(
+    tmp_path: Path,
+) -> None:
+    """max_reconnect_attempts cannot be negative."""
+    config = _agent_config(tmp_path)
+    object.__setattr__(config, "max_reconnect_attempts", -1)
+
+    with pytest.raises(ConfigError, match="negative"):
+        validate_agent_config(config)
+
+
 def test_load_agent_config_requires_enrollment_ca_bundle(tmp_path: Path) -> None:
     """Agent enrollment CA config cannot fall back to tunnel TLS config."""
     config_path = tmp_path / "agent.conf"
@@ -333,6 +417,7 @@ def _agent_config(
         proxy_target_port=2222,
         heartbeat_seconds=30,
         reconnect_backoff_max_seconds=300,
+        max_reconnect_attempts=0,
     )
 
 
